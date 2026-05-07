@@ -48,6 +48,20 @@
   const W = 480;
   const H = 270;
 
+  // Combat tuning. These are the contract for spec hitscan-weapon and the
+  // downstream Bayesian-skill spec; field names in `stats` must not change.
+  const FIRE_COOLDOWN_MS = 250;
+  const SHOT_DAMAGE = 2;
+  const MAX_AMMO = 24;
+  const AMMO_REFUND = 3;
+  const ENEMY_RADIUS = 0.4;
+  const MAX_HP = 100;
+  const CONTACT_RADIUS = 0.6;
+  const CONTACT_DPS = 10;
+  const MUZZLE_FLASH_MS = 80;
+  const HIT_TINT_MS = 120;
+  const ENEMY_FLASH_MS = 80;
+
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingEnabled = false;
@@ -86,8 +100,19 @@
     x: 1.5,
     y: 8.5,
     dirX: 1, dirY: 0,
-    planeX: 0, planeY: 0.66
+    planeX: 0, planeY: 0.66,
+    hp: MAX_HP
   };
+
+  // Schema is the contract consumed by the upcoming Bayesian-skill spec.
+  // Each shot is a Bernoulli trial; success = hit. Do not rename fields.
+  const stats = { shotsFired: 0, shotsHit: 0, kills: 0, deaths: 0 };
+
+  let ammo = MAX_AMMO;
+  let lastFireTime = -Infinity;
+  let muzzleFlashUntil = 0;
+  let hitTintUntil = 0;
+  let nowMs = 0;
 
   const keys = Object.create(null);
   let mouseDx = 0;
@@ -95,12 +120,20 @@
 
   const blockedKeys = new Set([
     'KeyW', 'KeyA', 'KeyS', 'KeyD',
-    'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'
+    'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+    'Space'
   ]);
 
   window.addEventListener('keydown', (e) => {
+    const wasDown = !!keys[e.code];
     keys[e.code] = true;
     if (blockedKeys.has(e.code)) e.preventDefault();
+    if (wasDown) return; // ignore auto-repeat for edge-triggered actions
+    if (e.code === 'Space') {
+      fireShot();
+    } else if (e.code === 'KeyR' && player.hp <= 0) {
+      resetRun();
+    }
   });
   window.addEventListener('keyup', (e) => {
     keys[e.code] = false;
@@ -115,6 +148,13 @@
       const p = canvas.requestPointerLock();
       if (p && typeof p.catch === 'function') p.catch(() => {});
     }
+  });
+  // Once pointer-locked, left-click fires; pre-lock click is for lock-grab.
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (!pointerLocked) return;
+    e.preventDefault();
+    fireShot();
   });
   document.addEventListener('pointerlockchange', () => {
     pointerLocked = (document.pointerLockElement === canvas);
@@ -159,6 +199,11 @@
   }
 
   function update(dt) {
+    if (player.hp <= 0) {
+      // Frozen death state. Drain queued input so it cannot leak post-reset.
+      mouseDx = 0;
+      return;
+    }
     const moveSpeed = 3.2;     // cells / second
     const rotSpeed  = 2.4;     // radians / second (keyboard)
     const mouseSens = 0.0022;  // radians per pixel of mouse movement
@@ -195,6 +240,7 @@
     }
 
     aiTick(dt);
+    applyContactDamage(dt);
   }
 
   // Cast a single column with DDA. Returns hit info; does NOT draw.
@@ -380,6 +426,7 @@
       alive: true,
       animPhase: Math.random() * 1000, // de-sync animation between enemies
       dirX: 0, dirY: -1,
+      hitFlashUntil: 0,
       damage(amount) {
         if (!this.alive) return;
         this.hp -= amount;
@@ -387,11 +434,32 @@
       },
     };
   }
-  const enemies = [
-    makeEnemy(5.5,  4.5,  'imp'),
-    makeEnemy(11.5, 11.5, 'grunt'),
-    makeEnemy(8.5,  9.5,  'imp'),
+  // Initial spawns; resetRun() rebuilds `enemies` from this on startup and on death.
+  const INITIAL_ENEMIES = [
+    { x: 5.5,  y: 4.5,  type: 'imp'   },
+    { x: 11.5, y: 11.5, type: 'grunt' },
+    { x: 8.5,  y: 9.5,  type: 'imp'   },
   ];
+  const PLAYER_SPAWN = { x: 1.5, y: 8.5, dirX: 1, dirY: 0, planeX: 0, planeY: 0.66 };
+  let enemies = [];
+
+  function resetRun() {
+    enemies = INITIAL_ENEMIES.map(s => makeEnemy(s.x, s.y, s.type));
+    player.x = PLAYER_SPAWN.x;
+    player.y = PLAYER_SPAWN.y;
+    player.dirX = PLAYER_SPAWN.dirX;
+    player.dirY = PLAYER_SPAWN.dirY;
+    player.planeX = PLAYER_SPAWN.planeX;
+    player.planeY = PLAYER_SPAWN.planeY;
+    player.hp = MAX_HP;
+    ammo = MAX_AMMO;
+    lastFireTime = -Infinity;
+    muzzleFlashUntil = 0;
+    hitTintUntil = 0;
+    mouseDx = 0;
+    for (const k in keys) keys[k] = false;
+  }
+  resetRun();
 
   // ---------------------------------------------------------------------------
   // AI tick — O(N) per frame. Advances animation phase and rotates enemies
@@ -411,6 +479,93 @@
         e.dirX = dx * inv;
         e.dirY = dy * inv;
       }
+    }
+  }
+
+  // DDA along an arbitrary unit ray. Mirrors castColumn's wall logic but
+  // takes origin + direction explicitly; returns perpendicular wall distance.
+  function castRay(originX, originY, rayDirX, rayDirY) {
+    let mapX = Math.floor(originX);
+    let mapY = Math.floor(originY);
+    const deltaDistX = rayDirX === 0 ? Infinity : Math.abs(1 / rayDirX);
+    const deltaDistY = rayDirY === 0 ? Infinity : Math.abs(1 / rayDirY);
+    let stepX, stepY, sideDistX, sideDistY;
+    if (rayDirX < 0) { stepX = -1; sideDistX = (originX - mapX) * deltaDistX; }
+    else             { stepX =  1; sideDistX = (mapX + 1.0 - originX) * deltaDistX; }
+    if (rayDirY < 0) { stepY = -1; sideDistY = (originY - mapY) * deltaDistY; }
+    else             { stepY =  1; sideDistY = (mapY + 1.0 - originY) * deltaDistY; }
+    let side = 0;
+    let safety = MAP_W + MAP_H + 4;
+    while (safety-- > 0) {
+      if (sideDistX < sideDistY) { sideDistX += deltaDistX; mapX += stepX; side = 0; }
+      else                       { sideDistY += deltaDistY; mapY += stepY; side = 1; }
+      if (mapX < 0 || mapY < 0 || mapX >= MAP_W || mapY >= MAP_H) break;
+      if (MAP[mapY][mapX] > 0) break;
+    }
+    let perp;
+    if (side === 0) perp = (mapX - originX + (1 - stepX) * 0.5) / rayDirX;
+    else            perp = (mapY - originY + (1 - stepY) * 0.5) / rayDirY;
+    if (!(perp > 0.0001)) perp = 0.0001;
+    return perp;
+  }
+
+  function fireShot() {
+    if (player.hp <= 0) return;            // frozen death state — no fire
+    const now = performance.now();
+    if (now - lastFireTime < FIRE_COOLDOWN_MS) return; // cooldown drops input
+    if (ammo <= 0) return;                  // dry trigger — counters untouched
+    lastFireTime = now;
+    ammo--;
+    stats.shotsFired++;
+    muzzleFlashUntil = now + MUZZLE_FLASH_MS;
+
+    const dWall = castRay(player.x, player.y, player.dirX, player.dirY);
+
+    // Nearest enemy along the ray within enemyRadius perpendicular and < dWall.
+    let bestT = Infinity;
+    let bestE = null;
+    const r2 = ENEMY_RADIUS * ENEMY_RADIUS;
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (!e.alive) continue;
+      const lx = e.x - player.x;
+      const ly = e.y - player.y;
+      const tProj = lx * player.dirX + ly * player.dirY;
+      if (tProj <= 0 || tProj >= dWall) continue;
+      const perp2 = lx * lx + ly * ly - tProj * tProj;
+      if (perp2 > r2) continue;
+      if (tProj < bestT) { bestT = tProj; bestE = e; }
+    }
+
+    if (bestE) {
+      stats.shotsHit++;
+      hitTintUntil = now + HIT_TINT_MS;
+      bestE.hitFlashUntil = now + ENEMY_FLASH_MS;
+      bestE.hp -= SHOT_DAMAGE;
+      if (bestE.hp <= 0) {
+        bestE.alive = false;
+        stats.kills++;
+        ammo = Math.min(MAX_AMMO, ammo + AMMO_REFUND);
+      }
+    }
+  }
+
+  function applyContactDamage(dt) {
+    if (player.hp <= 0) return;
+    const r2 = CONTACT_RADIUS * CONTACT_RADIUS;
+    let touching = false;
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (!e.alive) continue;
+      const dx = e.x - player.x;
+      const dy = e.y - player.y;
+      if (dx * dx + dy * dy <= r2) { touching = true; break; }
+    }
+    if (!touching) return;
+    player.hp -= CONTACT_DPS * dt;
+    if (player.hp <= 0) {
+      player.hp = 0;
+      stats.deaths++;
     }
   }
 
@@ -458,11 +613,20 @@
 
     ctx.putImageData(buf, 0, 0);
 
-    // Crosshair: 3-pixel cross in the middle.
-    ctx.fillStyle = '#fff';
+    // Crosshair: 3-pixel cross in the middle. Tints red briefly after a hit.
+    const crossColor = (nowMs < hitTintUntil) ? '#f44' : '#fff';
+    ctx.fillStyle = crossColor;
     const cx = W >> 1, cy = H >> 1;
     ctx.fillRect(cx - 1, cy, 3, 1);
     ctx.fillRect(cx, cy - 1, 1, 3);
+
+    // Additive muzzle flash overlay: lower-center, decays after MUZZLE_FLASH_MS.
+    if (nowMs < muzzleFlashUntil) {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = 'rgba(255, 220, 80, 0.55)';
+      ctx.fillRect((W * 0.30) | 0, (H * 0.55) | 0, (W * 0.40) | 0, (H * 0.25) | 0);
+      ctx.globalCompositeOperation = 'source-over';
+    }
 
     // FPS counter overlay.
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
@@ -470,7 +634,44 @@
     ctx.fillStyle = '#fff';
     ctx.font = '12px monospace';
     ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
     ctx.fillText(fps.toFixed(0) + ' fps', 6, 4);
+
+    drawHUD();
+
+    if (player.hp <= 0) {
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0, (H >> 1) - 14, W, 28);
+      ctx.fillStyle = '#f55';
+      ctx.font = '12px monospace';
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'center';
+      ctx.fillText('YOU DIED — press R to restart', W >> 1, (H >> 1) - 6);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  function drawHUD() {
+    const hpFrac = Math.max(0, Math.min(1, player.hp / MAX_HP));
+    // HUD strip background to keep text legible against any wall colour.
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, H - 18, W, 18);
+    // Thin red HP bar above the readouts.
+    ctx.fillStyle = '#400';
+    ctx.fillRect(0, H - 20, W, 2);
+    ctx.fillStyle = '#e22';
+    ctx.fillRect(0, H - 20, (W * hpFrac) | 0, 2);
+
+    ctx.font = '12px monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'left';
+    ctx.fillText('HP   ' + (Math.ceil(player.hp) | 0), 4, H - 14);
+    ctx.textAlign = 'center';
+    ctx.fillText('AMMO  ' + ammo + ' / ' + MAX_AMMO, W >> 1, H - 14);
+    ctx.textAlign = 'right';
+    ctx.fillText('KILLS ' + stats.kills, W - 4, H - 14);
+    ctx.textAlign = 'left';
   }
 
   // ---------------------------------------------------------------------------
@@ -521,6 +722,7 @@
 
       const frames = SPRITES[o.e.type];
       const sprite = frames[(o.e.animPhase | 0) & 1];
+      const flash = nowMs < o.e.hitFlashUntil;
 
       const shade = Math.min(1, 5 / (transformY + 0.5));
       const sStep = SPRITE_SIZE / spriteH;
@@ -539,10 +741,14 @@
           if (ty >= 0 && ty < SPRITE_SIZE) {
             const c = sprite[ty * SPRITE_SIZE + texX];
             if (c !== 0) {
-              const r = (((c       ) & 0xff) * shade) | 0;
-              const g = (((c >>  8) & 0xff) * shade) | 0;
-              const b = (((c >> 16) & 0xff) * shade) | 0;
-              buf32[bufIdx] = (255 << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff);
+              if (flash) {
+                buf32[bufIdx] = 0xffffffff; // full white silhouette
+              } else {
+                const r = (((c       ) & 0xff) * shade) | 0;
+                const g = (((c >>  8) & 0xff) * shade) | 0;
+                const b = (((c >> 16) & 0xff) * shade) | 0;
+                buf32[bufIdx] = (255 << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff);
+              }
             }
           }
           bufIdx += W;
@@ -557,6 +763,7 @@
   let fpsAcc = 0, fpsFrames = 0;
 
   function loop(now) {
+    nowMs = now;
     let dt = (now - lastTime) / 1000;
     lastTime = now;
     if (dt > 0.05) dt = 0.05; // avoid teleport on tab refocus
