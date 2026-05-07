@@ -193,6 +193,8 @@
       moveAxisX(mvX * s);
       moveAxisY(mvY * s);
     }
+
+    aiTick(dt);
   }
 
   // Cast a single column with DDA. Returns hit info; does NOT draw.
@@ -252,6 +254,166 @@
   const CEIL_C  = rgba32(28, 32, 50);
   const FLOOR_C = rgba32(70, 60, 50);
 
+  // ---------------------------------------------------------------------------
+  // Sprite assets — procedurally baked at startup. No external files.
+  // Each frame is a Uint32Array(SPRITE_SIZE * SPRITE_SIZE); 0 = transparent.
+  // Two frames per type drive the ~4 Hz idle animation.
+  // ---------------------------------------------------------------------------
+  const SPRITE_SIZE = 16;
+
+  function buildFrame(rows, palette) {
+    const out = new Uint32Array(SPRITE_SIZE * SPRITE_SIZE);
+    for (let y = 0; y < SPRITE_SIZE; y++) {
+      const row = rows[y];
+      for (let x = 0; x < SPRITE_SIZE; x++) {
+        const c = row.charAt(x);
+        const v = palette[c];
+        if (v) out[y * SPRITE_SIZE + x] = v;
+      }
+    }
+    return out;
+  }
+
+  const impPalette = {
+    'R': rgba32(220,  60,  50), // bright red
+    'r': rgba32(140,  30,  25), // dark red outline
+    'b': rgba32( 20,   0,   0), // eye / mouth
+    'y': rgba32(255, 220,  60), // glowing eye
+    'h': rgba32( 90,  20,  15), // horn / hoof
+  };
+  const impFrame1 = buildFrame([
+    '................',
+    '......hh..hh....',
+    '......RR..RR....',
+    '.....rRRRRRRr...',
+    '....rRyRRRRyRr..',
+    '....rRRbRRbRRr..',
+    '....rRRRRRRRRr..',
+    '.....rRRRRRRr...',
+    '......rRRRRr....',
+    '....rRRRRRRRRr..',
+    '...rRRRRRRRRRRr.',
+    '...rRRRRRRRRRRr.',
+    '....rRRRRRRRRr..',
+    '.....rRr..rRr...',
+    '.....rhr..rhr...',
+    '.....hhh..hhh...',
+  ], impPalette);
+  const impFrame2 = buildFrame([
+    '................',
+    '......hh..hh....',
+    '......RR..RR....',
+    '.....rRRRRRRr...',
+    '....rRyRRRRyRr..',
+    '....rRRbRRbRRr..',
+    '....rRRRRRRRRr..',
+    '.....rRRRRRRr...',
+    '......rRRRRr....',
+    '....rRRRRRRRRr..',
+    '...rRRRRRRRRRRr.',
+    '...rRRRRRRRRRRr.',
+    '....rRRRRRRRRr..',
+    '....rRr....rRr..',
+    '....rhr....rhr..',
+    '....hhh....hhh..',
+  ], impPalette);
+
+  const gruntPalette = {
+    'G': rgba32( 90, 190,  90), // bright green
+    'g': rgba32( 30, 100,  40), // dark green outline
+    'b': rgba32( 10,  10,  10), // visor / eye
+    'y': rgba32(240, 220, 100), // belt / detail
+    'k': rgba32( 50,  60,  50), // boot / glove
+  };
+  const gruntFrame1 = buildFrame([
+    '................',
+    '.....gggggg.....',
+    '....gGGGGGGg....',
+    '....gGbbbbGg....',
+    '....gGGGGGGg....',
+    '...gGGGGGGGGg...',
+    '..gGgGGGGGGgGg..',
+    '..gGgGGGGGGgGg..',
+    '..gGGGGGGGGGGg..',
+    '...gGyyyyyyGg...',
+    '...gGGGGGGGGg...',
+    '....gGGGGGGg....',
+    '....gGg..gGg....',
+    '....gGg..gGg....',
+    '....gkg..gkg....',
+    '....kkk..kkk....',
+  ], gruntPalette);
+  const gruntFrame2 = buildFrame([
+    '................',
+    '.....gggggg.....',
+    '....gGGGGGGg....',
+    '....gGbbbbGg....',
+    '....gGGGGGGg....',
+    '...gGGGGGGGGg...',
+    '..gGgGGGGGGgGg..',
+    '..gGgGGGGGGgGg..',
+    '..gGGGGGGGGGGg..',
+    '...gGyyyyyyGg...',
+    '...gGGGGGGGGg...',
+    '....gGGGGGGg....',
+    '....gGg..gGg....',
+    '...gGg....gGg...',
+    '...gkg....gkg...',
+    '...kkk....kkk...',
+  ], gruntPalette);
+
+  const SPRITES = {
+    imp:   [impFrame1, impFrame2],
+    grunt: [gruntFrame1, gruntFrame2],
+  };
+
+  // ---------------------------------------------------------------------------
+  // Enemy entities. Schema: { x, y, type, hp, alive, animPhase, dirX, dirY,
+  // damage(amount) }. Later specs (hitscan, Bayesian) extend this with
+  // lastHitTick, kills, etc.
+  // ---------------------------------------------------------------------------
+  function makeEnemy(x, y, type) {
+    const hp = type === 'imp' ? 3 : 5;
+    return {
+      x, y, type,
+      hp,
+      alive: true,
+      animPhase: Math.random() * 1000, // de-sync animation between enemies
+      dirX: 0, dirY: -1,
+      damage(amount) {
+        if (!this.alive) return;
+        this.hp -= amount;
+        if (this.hp <= 0) this.alive = false;
+      },
+    };
+  }
+  const enemies = [
+    makeEnemy(5.5,  4.5,  'imp'),
+    makeEnemy(11.5, 11.5, 'grunt'),
+    makeEnemy(8.5,  9.5,  'imp'),
+  ];
+
+  // ---------------------------------------------------------------------------
+  // AI tick — O(N) per frame. Advances animation phase and rotates enemies
+  // within ~6 cells to face the player. No movement this spec.
+  // ---------------------------------------------------------------------------
+  function aiTick(dt) {
+    const AGGRO_R2 = 36; // 6 cells, squared
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (!e.alive) continue;
+      e.animPhase += dt * 4; // ~4 Hz between two frames
+      const dx = player.x - e.x;
+      const dy = player.y - e.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < AGGRO_R2 && d2 > 1e-6) {
+        const inv = 1 / Math.sqrt(d2);
+        e.dirX = dx * inv;
+        e.dirY = dy * inv;
+      }
+    }
+  }
+
   function fillBackground() {
     buf32.fill(CEIL_C, 0, HALF_H * W);
     buf32.fill(FLOOR_C, HALF_H * W, W * H);
@@ -292,6 +454,8 @@
       }
     }
 
+    drawSprites();
+
     ctx.putImageData(buf, 0, 0);
 
     // Crosshair: 3-pixel cross in the middle.
@@ -307,6 +471,84 @@
     ctx.font = '12px monospace';
     ctx.textBaseline = 'top';
     ctx.fillText(fps.toFixed(0) + ' fps', 6, 4);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sprite renderer. Runs after the wall pass populates `zBuffer` and before
+  // the single putImageData blit. Per-screen-column z-test against `zBuffer`.
+  // ---------------------------------------------------------------------------
+  // Scratch list reused each frame to avoid allocation in the hot loop.
+  const spriteOrder = [];
+  function drawSprites() {
+    spriteOrder.length = 0;
+    const px = player.x, py = player.y;
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (!e.alive) continue;
+      const dx = e.x - px;
+      const dy = e.y - py;
+      spriteOrder.push({ e, dx, dy, d2: dx * dx + dy * dy, id: i });
+    }
+    if (spriteOrder.length === 0) return;
+    // Farthest first so nearer sprites overdraw. Stable tiebreak on id.
+    spriteOrder.sort((a, b) => (b.d2 - a.d2) || (a.id - b.id));
+
+    const invDet = 1.0 / (player.planeX * player.dirY - player.dirX * player.planeY);
+    const halfW = W >> 1;
+    const halfH = H >> 1;
+
+    for (let s = 0; s < spriteOrder.length; s++) {
+      const o = spriteOrder[s];
+      const transformX = invDet * (player.dirY * o.dx - player.dirX * o.dy);
+      const transformY = invDet * (-player.planeY * o.dx + player.planeX * o.dy);
+      if (transformY <= 0.01) continue; // behind / on camera plane
+
+      const screenX = (halfW * (1 + transformX / transformY)) | 0;
+      const spriteH = Math.abs((H / transformY) | 0);
+      const spriteW = spriteH;
+      if (spriteH < 1) continue;
+
+      const drawStartX = -((spriteW >> 1)) + screenX;
+      const drawStartY = -((spriteH >> 1)) + halfH;
+      const drawEndX = drawStartX + spriteW;
+      const drawEndY = drawStartY + spriteH;
+
+      let clipStartX = drawStartX < 0 ? 0 : drawStartX;
+      let clipEndX   = drawEndX   > W ? W : drawEndX;
+      let clipStartY = drawStartY < 0 ? 0 : drawStartY;
+      let clipEndY   = drawEndY   > H ? H : drawEndY;
+      if (clipStartX >= clipEndX || clipStartY >= clipEndY) continue;
+
+      const frames = SPRITES[o.e.type];
+      const sprite = frames[(o.e.animPhase | 0) & 1];
+
+      const shade = Math.min(1, 5 / (transformY + 0.5));
+      const sStep = SPRITE_SIZE / spriteH;
+      const tStep = SPRITE_SIZE / spriteW;
+
+      for (let stripe = clipStartX; stripe < clipEndX; stripe++) {
+        if (transformY >= zBuffer[stripe]) continue;
+        const texX = (((stripe - drawStartX) * tStep) | 0);
+        if (texX < 0 || texX >= SPRITE_SIZE) continue;
+
+        let texY = (clipStartY - drawStartY) * sStep;
+        let bufIdx = clipStartY * W + stripe;
+        for (let y = clipStartY; y < clipEndY; y++) {
+          const ty = texY | 0;
+          texY += sStep;
+          if (ty >= 0 && ty < SPRITE_SIZE) {
+            const c = sprite[ty * SPRITE_SIZE + texX];
+            if (c !== 0) {
+              const r = (((c       ) & 0xff) * shade) | 0;
+              const g = (((c >>  8) & 0xff) * shade) | 0;
+              const b = (((c >> 16) & 0xff) * shade) | 0;
+              buf32[bufIdx] = (255 << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff);
+            }
+          }
+          bufIdx += W;
+        }
+      }
+    }
   }
 
   // Game loop.
