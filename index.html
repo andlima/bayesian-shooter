@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Raycaster MVP</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+    font-family: monospace;
+    color: #ccc;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    width: 100vw;
+    height: 100vh;
+    cursor: crosshair;
+    display: block;
+    background: #000;
+  }
+  .hint {
+    position: fixed;
+    bottom: 8px;
+    left: 8px;
+    font-size: 12px;
+    color: #aaa;
+    pointer-events: none;
+    text-shadow: 0 1px 2px #000, 0 0 2px #000;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c" width="480" height="270"></canvas>
+<div class="hint">Click to lock mouse &middot; WASD to move &middot; Mouse / arrows to look &middot; Esc to release</div>
+<script>
+'use strict';
+(() => {
+  const W = 480;
+  const H = 270;
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+
+  const buf = ctx.createImageData(W, H);
+  const buf8 = buf.data;
+  const buf32 = new Uint32Array(buf8.buffer);
+
+  // Per-column perpendicular-distance z-buffer (used by future sprite specs).
+  const zBuffer = new Float32Array(W);
+
+  // 16x16 map. 0 = empty, 1 = brick (red), 2 = stone (blue).
+  const MAP = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,2,2,2,0,0,0,0,0,2,2,2,2,0,1],
+    [1,0,2,0,0,0,0,1,1,0,0,0,0,2,0,1],
+    [1,0,2,0,0,0,0,1,0,0,0,0,0,2,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,2,2,2,0,0,0,1,0,0,0,1],
+    [1,0,0,1,0,0,0,2,0,0,0,1,1,0,0,1],
+    [1,0,0,1,0,0,0,2,0,0,0,0,0,0,0,1],
+    [1,0,0,1,0,0,2,2,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,2,2,2,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,2,0,1],
+    [1,0,0,0,0,1,1,1,1,0,0,0,0,2,0,1],
+    [1,0,0,0,0,0,0,0,1,0,0,2,2,2,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+  ];
+  const MAP_W = MAP[0].length;
+  const MAP_H = MAP.length;
+
+  // Player state. dir is a unit vector; plane is perpendicular; |plane| ~ 0.66 -> ~66 deg FOV.
+  const player = {
+    x: 1.5,
+    y: 8.5,
+    dirX: 1, dirY: 0,
+    planeX: 0, planeY: 0.66
+  };
+
+  const keys = Object.create(null);
+  let mouseDx = 0;
+  let pointerLocked = false;
+
+  const blockedKeys = new Set([
+    'KeyW', 'KeyA', 'KeyS', 'KeyD',
+    'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'
+  ]);
+
+  window.addEventListener('keydown', (e) => {
+    keys[e.code] = true;
+    if (blockedKeys.has(e.code)) e.preventDefault();
+  });
+  window.addEventListener('keyup', (e) => {
+    keys[e.code] = false;
+  });
+  window.addEventListener('blur', () => {
+    for (const k in keys) keys[k] = false;
+    mouseDx = 0;
+  });
+
+  canvas.addEventListener('click', () => {
+    if (!pointerLocked) {
+      const p = canvas.requestPointerLock();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+  });
+  document.addEventListener('pointerlockchange', () => {
+    pointerLocked = (document.pointerLockElement === canvas);
+    if (!pointerLocked) mouseDx = 0;
+  });
+  document.addEventListener('pointerlockerror', () => {
+    pointerLocked = false;
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (pointerLocked) mouseDx += e.movementX || 0;
+  });
+
+  function isWall(mx, my) {
+    if (mx < 0 || my < 0 || mx >= MAP_W || my >= MAP_H) return true;
+    return MAP[my][mx] !== 0;
+  }
+
+  // Axis-resolved collision: treat the player as a small AABB of half-size r.
+  function moveAxisX(delta) {
+    if (delta === 0) return;
+    const r = 0.2;
+    const nx = player.x + delta;
+    const probe = nx + (delta > 0 ? r : -r);
+    const cellX = Math.floor(probe);
+    const cellY1 = Math.floor(player.y - r);
+    const cellY2 = Math.floor(player.y + r);
+    if (!isWall(cellX, cellY1) && !isWall(cellX, cellY2)) {
+      player.x = nx;
+    }
+  }
+  function moveAxisY(delta) {
+    if (delta === 0) return;
+    const r = 0.2;
+    const ny = player.y + delta;
+    const probe = ny + (delta > 0 ? r : -r);
+    const cellY = Math.floor(probe);
+    const cellX1 = Math.floor(player.x - r);
+    const cellX2 = Math.floor(player.x + r);
+    if (!isWall(cellX1, cellY) && !isWall(cellX2, cellY)) {
+      player.y = ny;
+    }
+  }
+
+  function update(dt) {
+    const moveSpeed = 3.2;     // cells / second
+    const rotSpeed  = 2.4;     // radians / second (keyboard)
+    const mouseSens = 0.0022;  // radians per pixel of mouse movement
+
+    let rot = 0;
+    if (keys['ArrowLeft'])  rot -= rotSpeed * dt;
+    if (keys['ArrowRight']) rot += rotSpeed * dt;
+    if (pointerLocked && mouseDx !== 0) {
+      rot += mouseDx * mouseSens;
+    }
+    mouseDx = 0;
+
+    if (rot !== 0) {
+      const cs = Math.cos(rot), sn = Math.sin(rot);
+      const odx = player.dirX, ody = player.dirY;
+      player.dirX = odx * cs - ody * sn;
+      player.dirY = odx * sn + ody * cs;
+      const opx = player.planeX, opy = player.planeY;
+      player.planeX = opx * cs - opy * sn;
+      player.planeY = opx * sn + opy * cs;
+    }
+
+    let mvX = 0, mvY = 0;
+    if (keys['KeyW'] || keys['ArrowUp'])   { mvX += player.dirX;   mvY += player.dirY; }
+    if (keys['KeyS'] || keys['ArrowDown']) { mvX -= player.dirX;   mvY -= player.dirY; }
+    if (keys['KeyA']) { mvX -= player.planeX; mvY -= player.planeY; }
+    if (keys['KeyD']) { mvX += player.planeX; mvY += player.planeY; }
+
+    const mvLen = Math.hypot(mvX, mvY);
+    if (mvLen > 0) {
+      const s = (moveSpeed * dt) / mvLen;
+      moveAxisX(mvX * s);
+      moveAxisY(mvY * s);
+    }
+  }
+
+  // Cast a single column with DDA. Returns hit info; does NOT draw.
+  function castColumn(x) {
+    const cameraX = (2 * x) / W - 1;
+    const rayDirX = player.dirX + player.planeX * cameraX;
+    const rayDirY = player.dirY + player.planeY * cameraX;
+
+    let mapX = Math.floor(player.x);
+    let mapY = Math.floor(player.y);
+
+    const deltaDistX = rayDirX === 0 ? Infinity : Math.abs(1 / rayDirX);
+    const deltaDistY = rayDirY === 0 ? Infinity : Math.abs(1 / rayDirY);
+
+    let stepX, stepY, sideDistX, sideDistY;
+    if (rayDirX < 0) { stepX = -1; sideDistX = (player.x - mapX) * deltaDistX; }
+    else             { stepX =  1; sideDistX = (mapX + 1.0 - player.x) * deltaDistX; }
+    if (rayDirY < 0) { stepY = -1; sideDistY = (player.y - mapY) * deltaDistY; }
+    else             { stepY =  1; sideDistY = (mapY + 1.0 - player.y) * deltaDistY; }
+
+    let side = 0;
+    let wallType = 1;
+    // Safety bound: any column resolves in <= MAP_W + MAP_H steps.
+    let safety = MAP_W + MAP_H + 4;
+    while (safety-- > 0) {
+      if (sideDistX < sideDistY) {
+        sideDistX += deltaDistX;
+        mapX += stepX;
+        side = 0;
+      } else {
+        sideDistY += deltaDistY;
+        mapY += stepY;
+        side = 1;
+      }
+      if (mapX < 0 || mapY < 0 || mapX >= MAP_W || mapY >= MAP_H) {
+        wallType = 1;
+        break;
+      }
+      const m = MAP[mapY][mapX];
+      if (m > 0) { wallType = m; break; }
+    }
+
+    let perpWallDist;
+    if (side === 0) perpWallDist = (mapX - player.x + (1 - stepX) * 0.5) / rayDirX;
+    else            perpWallDist = (mapY - player.y + (1 - stepY) * 0.5) / rayDirY;
+    if (!(perpWallDist > 0.0001)) perpWallDist = 0.0001;
+
+    return { perpWallDist, side, wallType };
+  }
+
+  // Pack RGBA into a little-endian Uint32 (R = LSB).
+  function rgba32(r, g, b) {
+    return (255 << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff);
+  }
+
+  const HALF_H = (H / 2) | 0;
+  const CEIL_C  = rgba32(28, 32, 50);
+  const FLOOR_C = rgba32(70, 60, 50);
+
+  function fillBackground() {
+    buf32.fill(CEIL_C, 0, HALF_H * W);
+    buf32.fill(FLOOR_C, HALF_H * W, W * H);
+  }
+
+  function render() {
+    fillBackground();
+
+    for (let x = 0; x < W; x++) {
+      const hit = castColumn(x);
+      const d = hit.perpWallDist;
+      zBuffer[x] = d;
+
+      let lineHeight = (H / d) | 0;
+      let drawStart = ((H - lineHeight) >> 1);
+      let drawEnd = drawStart + lineHeight;
+      if (drawStart < 0) drawStart = 0;
+      if (drawEnd > H) drawEnd = H;
+
+      let r, g, b;
+      if (hit.wallType === 2) { r =  70; g = 110; b = 200; }
+      else                    { r = 200; g =  80; b =  60; }
+      if (hit.side === 1) {
+        r = (r * 0.6) | 0;
+        g = (g * 0.6) | 0;
+        b = (b * 0.6) | 0;
+      }
+      const shade = Math.min(1, 5 / (d + 0.5));
+      r = (r * shade) | 0;
+      g = (g * shade) | 0;
+      b = (b * shade) | 0;
+      const c = rgba32(r, g, b);
+
+      let i = drawStart * W + x;
+      for (let y = drawStart; y < drawEnd; y++) {
+        buf32[i] = c;
+        i += W;
+      }
+    }
+
+    ctx.putImageData(buf, 0, 0);
+
+    // Crosshair: 3-pixel cross in the middle.
+    ctx.fillStyle = '#fff';
+    const cx = W >> 1, cy = H >> 1;
+    ctx.fillRect(cx - 1, cy, 3, 1);
+    ctx.fillRect(cx, cy - 1, 1, 3);
+
+    // FPS counter overlay.
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(2, 2, 64, 16);
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(fps.toFixed(0) + ' fps', 6, 4);
+  }
+
+  // Game loop.
+  let lastTime = performance.now();
+  let fps = 0;
+  let fpsAcc = 0, fpsFrames = 0;
+
+  function loop(now) {
+    let dt = (now - lastTime) / 1000;
+    lastTime = now;
+    if (dt > 0.05) dt = 0.05; // avoid teleport on tab refocus
+    if (!(dt >= 0)) dt = 0;
+
+    update(dt);
+    render();
+
+    fpsAcc += dt;
+    fpsFrames++;
+    if (fpsAcc >= 0.5) {
+      fps = fpsFrames / fpsAcc;
+      fpsAcc = 0;
+      fpsFrames = 0;
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
