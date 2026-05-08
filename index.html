@@ -114,6 +114,18 @@
   // Throttles continuous contact-damage SFX so it doesn't fire every frame.
   let nextContactHurtMs = 0;
 
+  // hud-feedback-polish: transient feedback timers + slots. All cleared in
+  // resetRun() so a second run starts without leftover flashes / pops.
+  let dmgFlashUntil = 0;       // expiry for the red-edge damage flash
+  let dmgFlashAt = 0;          // nowMs when the flash was triggered (fade math)
+  let nextDmgFlashMs = 0;      // throttle so contact damage doesn't restart it every frame
+  // Single-slot damage-direction arrow. worldAngle is captured at trigger time;
+  // the screen-relative angle is re-derived each frame from current player.dir*.
+  let dmgArrow = null;         // { worldAngle, atMs, untilMs } | null
+  // FIFO of active kill pops, capped at KILL_POP_MAX to bound work per frame.
+  const killPops = [];         // [{ x, y, atMs, untilMs }, ...]
+  const KILL_POP_MAX = 16;
+
   // ---------------------------------------------------------------------------
   // Audio: lazily-created Web Audio context with a single master gain. Browsers
   // reject AudioContext creation before a user gesture, so ensureAudio() runs
@@ -534,6 +546,13 @@
     muzzleFlashUntil = 0;
     hitTintUntil = 0;
     nextContactHurtMs = 0;
+    // hud-feedback-polish: clear all transient feedback state so a fresh run
+    // doesn't inherit a leftover pulse, arrow, or "+1" pop.
+    dmgFlashUntil = 0;
+    dmgFlashAt = 0;
+    nextDmgFlashMs = 0;
+    dmgArrow = null;
+    killPops.length = 0;
     mouseDx = 0;
     for (const k in keys) keys[k] = false;
   }
@@ -881,6 +900,8 @@
     stats.enemyShotsHit++;
     player.hp -= e.rangedDamage;
     sfxHurt();
+    triggerDamageFlash(now);
+    setDamageArrow(e, now);
     if (player.hp <= 0) {
       player.hp = 0;
       stats.deaths++;
@@ -1021,6 +1042,11 @@
         stats.kills++;
         sfxKill();
         ammo = Math.min(MAX_AMMO, ammo + AMMO_REFUND);
+        // hud-feedback-polish: spawn a "+1" pop at the kill location. Cap at
+        // KILL_POP_MAX so a long burst can't grow the array unbounded.
+        if (killPops.length < KILL_POP_MAX) {
+          killPops.push({ x: bestE.x, y: bestE.y, atMs: now, untilMs: now + 500 });
+        }
       }
     }
   }
@@ -1028,21 +1054,36 @@
   function applyContactDamage(dt) {
     if (player.hp <= 0) return;
     const r2 = CONTACT_RADIUS * CONTACT_RADIUS;
-    let touching = false;
+    // Track the nearest touching enemy; the direction arrow points at it so
+    // that walking around a clump of enemies aims at whichever is currently
+    // hugging the player.
+    let nearestE = null;
+    let nearestD2 = Infinity;
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
       if (!e.alive) continue;
       const dx = e.x - player.x;
       const dy = e.y - player.y;
-      if (dx * dx + dy * dy <= r2) { touching = true; break; }
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= r2 && d2 < nearestD2) {
+        nearestE = e;
+        nearestD2 = d2;
+      }
     }
-    if (!touching) return;
+    if (!nearestE) return;
     player.hp -= CONTACT_DPS * dt;
     // Throttle: continuous DPS would otherwise stack a buzz every frame.
     if (nowMs >= nextContactHurtMs) {
       sfxHurt();
       nextContactHurtMs = nowMs + 300;
     }
+    // hud-feedback-polish: mirror the audio cadence for the vignette so the
+    // red flash pulses instead of going opaque while in continuous contact.
+    if (nowMs >= nextDmgFlashMs) {
+      triggerDamageFlash(nowMs);
+      nextDmgFlashMs = nowMs + 300;
+    }
+    setDamageArrow(nearestE, nowMs);
     if (player.hp <= 0) {
       player.hp = 0;
       stats.deaths++;
@@ -1110,6 +1151,11 @@
       ctx.globalCompositeOperation = 'source-over';
     }
 
+    // hud-feedback-polish: vignette + heartbeat sit under the HUD strip; kill
+    // pops sit between the vignette and the HUD so they never cover readouts.
+    drawDamageEdges();
+    drawKillPops();
+
     drawMinimap();
 
     // FPS counter overlay.
@@ -1123,6 +1169,10 @@
 
     drawHUD();
 
+    // hud-feedback-polish: damage arrow draws on top of the HUD strip so it
+    // stays visible when the player is huddled in a corner; under death overlay.
+    drawDamageArrow();
+
     if (player.hp <= 0) {
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
       ctx.fillRect(0, (H >> 1) - 14, W, 28);
@@ -1133,6 +1183,111 @@
       ctx.fillText('YOU DIED — press R to restart', W >> 1, (H >> 1) - 6);
       ctx.textAlign = 'left';
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // hud-feedback-polish: damage vignette + heartbeat, kill "+1" pops, and the
+  // damage-direction arrow. All four helpers consume `nowMs` directly so the
+  // timers stay in sync with the rest of the frame.
+  // ---------------------------------------------------------------------------
+  function triggerDamageFlash(t) {
+    dmgFlashAt = t;
+    dmgFlashUntil = t + 250;
+  }
+
+  function setDamageArrow(srcEnemy, t) {
+    const dx = srcEnemy.x - player.x;
+    const dy = srcEnemy.y - player.y;
+    if (dx === 0 && dy === 0) return;
+    dmgArrow = {
+      worldAngle: Math.atan2(dy, dx),
+      atMs: t,
+      untilMs: t + 600,
+    };
+  }
+
+  function drawDamageEdges() {
+    let alphaFlash = 0;
+    if (nowMs < dmgFlashUntil) {
+      const t = (nowMs - dmgFlashAt) / 250;       // 0 -> 1 over the flash
+      alphaFlash = 0.45 * (1 - t);
+    }
+    let alphaPulse = 0;
+    if (player.hp > 0 && player.hp <= 30) {
+      const hpFrac = player.hp / 30;              // 1 at HP=30, 0 at HP=0
+      const rateHz = 1 + (1 - hpFrac) * 1.5;      // 1 Hz -> 2.5 Hz
+      const phase = (nowMs / 1000) * rateHz * 2 * Math.PI;
+      alphaPulse = 0.10 + 0.10 * (Math.sin(phase) * 0.5 + 0.5);
+    }
+    // Max (not sum) so simultaneous flash + pulse never saturate to opaque red.
+    const a = Math.max(alphaFlash, alphaPulse);
+    if (a <= 0) return;
+    ctx.fillStyle = `rgba(220, 30, 30, ${a.toFixed(3)})`;
+    const T = 28;
+    ctx.fillRect(0, 0, W, T);
+    ctx.fillRect(0, H - T, W, T);
+    ctx.fillRect(0, 0, T, H);
+    ctx.fillRect(W - T, 0, T, H);
+  }
+
+  function drawKillPops() {
+    if (killPops.length === 0) return;
+    // Same camera math as drawSprites(); kept inline (4 lines) so this section
+    // is self-contained.
+    const invDet = 1 / (player.planeX * player.dirY - player.dirX * player.planeY);
+    const halfW = W >> 1;
+    const halfH = H >> 1;
+    ctx.font = '10px monospace';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    for (let i = killPops.length - 1; i >= 0; i--) {
+      const p = killPops[i];
+      if (nowMs >= p.untilMs) { killPops.splice(i, 1); continue; }
+      const t = (nowMs - p.atMs) / (p.untilMs - p.atMs); // 0 -> 1
+      const camX = p.x - player.x;
+      const camY = p.y - player.y;
+      const transformX = invDet * (player.dirY * camX - player.dirX * camY);
+      const transformY = invDet * (-player.planeY * camX + player.planeX * camY);
+      // Behind the player: hide this frame but keep the pop alive.
+      if (transformY <= 0) continue;
+      const screenX = (halfW * (1 + transformX / transformY)) | 0;
+      const screenY = (halfH - 12 * t) | 0;       // float up ~12 px
+      const a = 1 - t;
+      ctx.fillStyle = `rgba(0,0,0,${(a * 0.7).toFixed(3)})`;
+      ctx.fillText('+1', screenX + 1, screenY + 1);
+      ctx.fillStyle = `rgba(255,255,224,${a.toFixed(3)})`;
+      ctx.fillText('+1', screenX, screenY);
+    }
+    // Restore defaults the rest of the HUD code expects.
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+  }
+
+  function drawDamageArrow() {
+    if (!dmgArrow) return;
+    if (nowMs >= dmgArrow.untilMs) { dmgArrow = null; return; }
+    const t = (nowMs - dmgArrow.atMs) / (dmgArrow.untilMs - dmgArrow.atMs);
+    const a = 1 - t;
+    // Player forward (dirX, dirY) maps to "up" on screen, so screenAngle =
+    // worldAngle - playerForwardAngle - pi/2. Verified against the four
+    // cardinal directions (front/back/left/right) of the player.
+    const fwd = Math.atan2(player.dirY, player.dirX);
+    const screenAngle = dmgArrow.worldAngle - fwd - Math.PI / 2;
+    const cx = W / 2, cy = H / 2;
+    const radius = Math.min(W, H) / 2 - 28;
+    const ax = cx + Math.cos(screenAngle) * radius;
+    const ay = cy + Math.sin(screenAngle) * radius;
+    ctx.save();
+    ctx.translate(ax, ay);
+    ctx.rotate(screenAngle + Math.PI / 2); // local triangle points up; rotate so tip faces outward
+    ctx.fillStyle = `rgba(220, 30, 30, ${a.toFixed(3)})`;
+    ctx.beginPath();
+    ctx.moveTo(0, -6);
+    ctx.lineTo(-5, 4);
+    ctx.lineTo(5, 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
   }
 
   function drawHUD() {
@@ -1151,8 +1306,20 @@
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'left';
     ctx.fillText('HP   ' + (Math.ceil(player.hp) | 0), 4, H - 14);
+
+    // hud-feedback-polish: AMMO turns warning-red at 5 and pulses at 0.
+    let ammoColor = '#fff';
+    if (ammo === 0) {
+      // ~3 Hz pulse between two reds: 167 ms ≈ 1/(2*3 Hz).
+      ammoColor = (Math.floor(nowMs / 167) % 2 === 0) ? '#f55' : '#a22';
+    } else if (ammo <= 5) {
+      ammoColor = '#f55';
+    }
+    ctx.fillStyle = ammoColor;
     ctx.textAlign = 'center';
     ctx.fillText('AMMO  ' + ammo + ' / ' + MAX_AMMO, W >> 1, H - 14);
+
+    ctx.fillStyle = '#fff';
     ctx.textAlign = 'right';
     ctx.fillText('KILLS ' + stats.kills, W - 4, H - 14);
     ctx.textAlign = 'left';
