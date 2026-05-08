@@ -41,7 +41,7 @@
 </head>
 <body>
 <canvas id="c" width="480" height="270"></canvas>
-<div class="hint">Click to lock mouse &middot; WASD to move &middot; Mouse / arrows to look &middot; Esc to release</div>
+<div class="hint">Click to lock mouse &middot; WASD to move &middot; Mouse / arrows to look &middot; N to regenerate &middot; Esc to release</div>
 <script>
 'use strict';
 (() => {
@@ -80,27 +80,13 @@
   // Per-column perpendicular-distance z-buffer (used by future sprite specs).
   const zBuffer = new Float32Array(W);
 
-  // 16x16 map. 0 = empty, 1 = brick (red), 2 = stone (blue).
-  const MAP = [
-    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-    [1,0,2,2,2,0,0,0,0,0,2,2,2,2,0,1],
-    [1,0,2,0,0,0,0,1,1,0,0,0,0,2,0,1],
-    [1,0,2,0,0,0,0,1,0,0,0,0,0,2,0,1],
-    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-    [1,0,0,0,0,2,2,2,0,0,0,1,0,0,0,1],
-    [1,0,0,1,0,0,0,2,0,0,0,1,1,0,0,1],
-    [1,0,0,1,0,0,0,2,0,0,0,0,0,0,0,1],
-    [1,0,0,1,0,0,2,2,0,0,0,0,0,0,0,1],
-    [1,0,0,0,0,0,0,0,0,0,0,2,2,2,0,1],
-    [1,0,0,0,0,0,0,0,0,0,0,0,0,2,0,1],
-    [1,0,0,0,0,1,1,1,1,0,0,0,0,2,0,1],
-    [1,0,0,0,0,0,0,0,1,0,0,2,2,2,0,1],
-    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
-  ];
-  const MAP_W = MAP[0].length;
-  const MAP_H = MAP.length;
+  // Procedurally generated 48x48 map. 0 = empty, 1 = brick (red), 2 = stone (blue).
+  // MAP / MAP_W / MAP_H are mutated by applyDungeon() at startup and each N-regen;
+  // every reader (castColumn, castRay, isWall, enemyCanSeePlayer, drawMinimap)
+  // reads through this live binding rather than a captured snapshot.
+  let MAP = [];
+  let MAP_W = 0;
+  let MAP_H = 0;
 
   // Player state. dir is a unit vector; plane is perpendicular; |plane| ~ 0.66 -> ~66 deg FOV.
   const player = {
@@ -195,7 +181,7 @@
   const blockedKeys = new Set([
     'KeyW', 'KeyA', 'KeyS', 'KeyD',
     'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
-    'Space'
+    'Space', 'KeyN'
   ]);
 
   window.addEventListener('keydown', (e) => {
@@ -208,6 +194,8 @@
       fireShot();
     } else if (e.code === 'KeyR' && player.hp <= 0) {
       resetRun();
+    } else if (e.code === 'KeyN') {
+      regenerateDungeon();
     } else if (e.code === 'KeyM') {
       // Mute toggle works even during the death freeze.
       muted = !muted;
@@ -526,17 +514,14 @@
       },
     };
   }
-  // Initial spawns; resetRun() rebuilds `enemies` from this on startup and on death.
-  const INITIAL_ENEMIES = [
-    { x: 5.5,  y: 4.5,  type: 'imp'   },
-    { x: 11.5, y: 11.5, type: 'grunt' },
-    { x: 8.5,  y: 9.5,  type: 'imp'   },
-  ];
-  const PLAYER_SPAWN = { x: 1.5, y: 8.5, dirX: 1, dirY: 0, planeX: 0, planeY: 0.66 };
+  // Spawn data is rebuilt by applyDungeon() on startup and on each N-regen;
+  // resetRun() then rebuilds the live `enemies` array from `enemySpawns`.
+  let enemySpawns = [];
+  let PLAYER_SPAWN = { x: 1.5, y: 1.5, dirX: 1, dirY: 0, planeX: 0, planeY: 0.66 };
   let enemies = [];
 
   function resetRun() {
-    enemies = INITIAL_ENEMIES.map(s => makeEnemy(s.x, s.y, s.type));
+    enemies = enemySpawns.map(s => makeEnemy(s.x, s.y, s.type));
     player.x = PLAYER_SPAWN.x;
     player.y = PLAYER_SPAWN.y;
     player.dirX = PLAYER_SPAWN.dirX;
@@ -552,7 +537,236 @@
     mouseDx = 0;
     for (const k in keys) keys[k] = false;
   }
-  resetRun();
+
+  // ---------------------------------------------------------------------------
+  // Procedural dungeon: a seeded mulberry32 PRNG drives both map carving and
+  // enemy placement. ?seed=<u32> in the URL pins the layout for bug reports;
+  // pressing N generates a fresh seed and rebuilds the world.
+  // ---------------------------------------------------------------------------
+  function mulberry32(seed) {
+    let s = seed >>> 0;
+    return function () {
+      s = (s + 0x6D2B79F5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function parseSeedFromUrl() {
+    try {
+      const sp = new URL(window.location.href).searchParams.get('seed');
+      if (sp == null || sp === '') return null;
+      const n = Number.parseInt(sp, 10);
+      if (!Number.isFinite(n) || n < 0 || n > 0xFFFFFFFF) return null;
+      return n >>> 0;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function pickRandomSeed() {
+    return Math.floor(Math.random() * 0x100000000) >>> 0;
+  }
+
+  function generateDungeon(seed) {
+    const rand = mulberry32(seed);
+    // 48x48 grid, in the spec's required 40-60 range.
+    const W = 48, H = 48;
+    const TARGET_MIN = 6, TARGET_MAX = 12;
+    const ROOM_MIN = 4, ROOM_MAX = 8;
+    const PLACE_ATTEMPTS = 80;
+    const MAX_TRIES = 60;
+
+    for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
+      // Allocate as walls; type assignment happens after carving.
+      const map = new Array(H);
+      for (let y = 0; y < H; y++) map[y] = new Array(W).fill(1);
+
+      // Pick non-overlapping rooms with a 1-cell buffer between rooms and from
+      // the outer boundary. Up to PLACE_ATTEMPTS tries, capped at TARGET_MAX.
+      const rooms = [];
+      for (let i = 0; i < PLACE_ATTEMPTS && rooms.length < TARGET_MAX; i++) {
+        const w = ROOM_MIN + Math.floor(rand() * (ROOM_MAX - ROOM_MIN + 1));
+        const h = ROOM_MIN + Math.floor(rand() * (ROOM_MAX - ROOM_MIN + 1));
+        // 1-cell outer wall buffer: x in [1, W-w-1].
+        const x = 1 + Math.floor(rand() * (W - w - 1));
+        const y = 1 + Math.floor(rand() * (H - h - 1));
+        let overlap = false;
+        for (let r = 0; r < rooms.length; r++) {
+          const o = rooms[r];
+          // 1-cell wall buffer between rooms: their AABBs must be separated by
+          // at least one cell on at least one axis.
+          if (!(x + w + 1 <= o.x || o.x + o.w + 1 <= x ||
+                y + h + 1 <= o.y || o.y + o.h + 1 <= y)) {
+            overlap = true;
+            break;
+          }
+        }
+        if (!overlap) rooms.push({ x, y, w, h });
+      }
+      if (rooms.length < TARGET_MIN) continue;
+
+      // Carve room interiors to floor.
+      for (let r = 0; r < rooms.length; r++) {
+        const room = rooms[r];
+        for (let y = room.y; y < room.y + room.h; y++) {
+          for (let x = room.x; x < room.x + room.w; x++) {
+            map[y][x] = 0;
+          }
+        }
+      }
+
+      // L-corridors between consecutive rooms by carve order; this guarantees
+      // connectivity by construction. The BFS below is a defensive sanity check.
+      for (let i = 1; i < rooms.length; i++) {
+        const a = rooms[i - 1];
+        const b = rooms[i];
+        const ax = a.x + ((a.w / 2) | 0);
+        const ay = a.y + ((a.h / 2) | 0);
+        const bx = b.x + ((b.w / 2) | 0);
+        const by = b.y + ((b.h / 2) | 0);
+        if (rand() < 0.5) {
+          // HV: horizontal at ay from ax to bx, then vertical at bx from ay to by.
+          for (let x = Math.min(ax, bx); x <= Math.max(ax, bx); x++) map[ay][x] = 0;
+          for (let y = Math.min(ay, by); y <= Math.max(ay, by); y++) map[y][bx] = 0;
+        } else {
+          // VH: vertical at ax from ay to by, then horizontal at by from ax to bx.
+          for (let y = Math.min(ay, by); y <= Math.max(ay, by); y++) map[y][ax] = 0;
+          for (let x = Math.min(ax, bx); x <= Math.max(ax, bx); x++) map[by][x] = 0;
+        }
+      }
+
+      // Assign wall types: weighted per-cell (~70% brick, ~30% stone). The
+      // count guard below forces a flip in the (essentially impossible) case
+      // where one type ended up at zero so the spec's "both types present"
+      // requirement is never silently violated.
+      let count1 = 0, count2 = 0;
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          if (map[y][x] !== 0) {
+            const t = rand() < 0.7 ? 1 : 2;
+            map[y][x] = t;
+            if (t === 1) count1++; else count2++;
+          }
+        }
+      }
+      if (count1 === 0 || count2 === 0) {
+        outer: for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            if (map[y][x] !== 0) {
+              map[y][x] = (count1 === 0) ? 1 : 2;
+              break outer;
+            }
+          }
+        }
+      }
+
+      // Pick starting room and player spawn at its center, facing a random
+      // cardinal direction. plane is perpendicular to dir with magnitude 0.66.
+      const startIdx = Math.floor(rand() * rooms.length);
+      const startRoom = rooms[startIdx];
+      const psCellX = startRoom.x + ((startRoom.w / 2) | 0);
+      const psCellY = startRoom.y + ((startRoom.h / 2) | 0);
+      const dirOpt = Math.floor(rand() * 4);
+      let dirX, dirY, planeX, planeY;
+      if (dirOpt === 0)      { dirX =  1; dirY =  0; planeX =  0;    planeY =  0.66; }
+      else if (dirOpt === 1) { dirX = -1; dirY =  0; planeX =  0;    planeY = -0.66; }
+      else if (dirOpt === 2) { dirX =  0; dirY =  1; planeX = -0.66; planeY =  0;    }
+      else                   { dirX =  0; dirY = -1; planeX =  0.66; planeY =  0;    }
+      const playerSpawn = {
+        x: psCellX + 0.5, y: psCellY + 0.5,
+        dirX, dirY, planeX, planeY,
+      };
+
+      // 4-connected BFS from the spawn cell. Anything unreachable triggers
+      // a fresh attempt with a different room layout.
+      const visited = new Array(H);
+      for (let y = 0; y < H; y++) visited[y] = new Array(W).fill(false);
+      const queue = [[psCellX, psCellY]];
+      visited[psCellY][psCellX] = true;
+      let head = 0, visitedCount = 1, totalFloor = 0;
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) if (map[y][x] === 0) totalFloor++;
+      }
+      const dxs = [1, -1, 0, 0], dys = [0, 0, 1, -1];
+      while (head < queue.length) {
+        const c = queue[head++];
+        const cx = c[0], cy = c[1];
+        for (let n = 0; n < 4; n++) {
+          const nx = cx + dxs[n], ny = cy + dys[n];
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          if (visited[ny][nx]) continue;
+          if (map[ny][nx] !== 0) continue;
+          visited[ny][nx] = true;
+          visitedCount++;
+          queue.push([nx, ny]);
+        }
+      }
+      if (visitedCount !== totalFloor) continue;
+
+      // Enemy spawns: 1-3 per non-starting room at distinct interior floor
+      // cells, capped at MAX_ENEMIES total. Type chosen per-spawn from the
+      // existing TYPE_TABLE (imp / grunt only).
+      const newSpawns = [];
+      const MAX_ENEMIES = 36;
+      for (let i = 0; i < rooms.length && newSpawns.length < MAX_ENEMIES; i++) {
+        if (i === startIdx) continue;
+        const room = rooms[i];
+        const cells = [];
+        for (let y = room.y; y < room.y + room.h; y++) {
+          for (let x = room.x; x < room.x + room.w; x++) {
+            if (map[y][x] === 0) cells.push({ x, y });
+          }
+        }
+        // Fisher-Yates with the seeded PRNG.
+        for (let s = cells.length - 1; s > 0; s--) {
+          const j = Math.floor(rand() * (s + 1));
+          const tmp = cells[s]; cells[s] = cells[j]; cells[j] = tmp;
+        }
+        const want = 1 + Math.floor(rand() * 3); // 1..3 inclusive
+        const count = Math.min(want, cells.length);
+        for (let k = 0; k < count && newSpawns.length < MAX_ENEMIES; k++) {
+          const cell = cells[k];
+          newSpawns.push({
+            x: cell.x + 0.5,
+            y: cell.y + 0.5,
+            type: rand() < 0.5 ? 'imp' : 'grunt',
+          });
+        }
+      }
+
+      return { map, mapW: W, mapH: H, rooms, playerSpawn, enemySpawns: newSpawns, seed };
+    }
+    // Should be unreachable with sane parameters; guard against silent failure.
+    throw new Error('dungeon generation failed after retries');
+  }
+
+  function applyDungeon(d) {
+    MAP = d.map;
+    MAP_W = d.mapW;
+    MAP_H = d.mapH;
+    PLAYER_SPAWN = d.playerSpawn;
+    enemySpawns = d.enemySpawns;
+  }
+
+  function regenerateDungeon() {
+    const seed = pickRandomSeed();
+    console.info('[seed] ' + seed);
+    applyDungeon(generateDungeon(seed));
+    resetRun();
+  }
+
+  // Initial dungeon: honour ?seed=<u32> when supplied so reloads reproduce a
+  // bug-report layout exactly. Logged once per generation.
+  {
+    const initialSeed = parseSeedFromUrl();
+    const seed = (initialSeed != null) ? initialSeed : pickRandomSeed();
+    console.info('[seed] ' + seed);
+    applyDungeon(generateDungeon(seed));
+    resetRun();
+  }
 
   // ---------------------------------------------------------------------------
   // AI: line-of-sight + per-enemy state machine. Modes:
