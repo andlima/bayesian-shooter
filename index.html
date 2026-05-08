@@ -61,6 +61,13 @@
   const MUZZLE_FLASH_MS = 80;
   const HIT_TINT_MS = 120;
   const ENEMY_FLASH_MS = 80;
+  // enemy-ai-combat: ranged-attack tuning. Times in ms; ranges in cells.
+  const WINDUP_MS = 600;
+  const ATTACK_COOLDOWN_MS = 1200;
+  const ATTACK_RANGE = 5.0;
+  const ENEMY_AI_RADIUS = 0.3;
+  const ENEMY_SEPARATION_R = 0.6;
+  const ENEMY_FIRE_FLASH_MS = 80;
 
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
@@ -106,7 +113,12 @@
 
   // Schema is the contract consumed by the upcoming Bayesian-skill spec.
   // Each shot is a Bernoulli trial; success = hit. Do not rename fields.
-  const stats = { shotsFired: 0, shotsHit: 0, kills: 0, deaths: 0 };
+  // enemyShotsFired/enemyShotsHit are the contract for the future
+  // adaptive-spawning spec, which reads them as a player-dodge prior.
+  const stats = {
+    shotsFired: 0, shotsHit: 0, kills: 0, deaths: 0,
+    enemyShotsFired: 0, enemyShotsHit: 0,
+  };
 
   let ammo = MAX_AMMO;
   let lastFireTime = -Infinity;
@@ -414,19 +426,29 @@
   };
 
   // ---------------------------------------------------------------------------
-  // Enemy entities. Schema: { x, y, type, hp, alive, animPhase, dirX, dirY,
-  // damage(amount) }. Later specs (hitscan, Bayesian) extend this with
-  // lastHitTick, kills, etc.
+  // Enemy entities. Schema: { x, y, type, hp, moveSpeed, rangedDamage, alive,
+  // animPhase, dirX, dirY, hitFlashUntil, fireFlashUntil, mode, modeUntil,
+  // damage(amount) }. mode ∈ { 'idle', 'chase', 'wind', 'cool' }.
   // ---------------------------------------------------------------------------
+  // Per-type stats. meleeRadius is consumed by the contact-damage check.
+  const TYPE_TABLE = {
+    imp:   { moveSpeed: 1.8, hp: 3, rangedDamage: 5,  meleeRadius: 0.6 },
+    grunt: { moveSpeed: 1.0, hp: 5, rangedDamage: 10, meleeRadius: 0.6 },
+  };
   function makeEnemy(x, y, type) {
-    const hp = type === 'imp' ? 3 : 5;
+    const t = TYPE_TABLE[type];
     return {
       x, y, type,
-      hp,
+      hp: t.hp,
+      moveSpeed: t.moveSpeed,
+      rangedDamage: t.rangedDamage,
       alive: true,
       animPhase: Math.random() * 1000, // de-sync animation between enemies
       dirX: 0, dirY: -1,
       hitFlashUntil: 0,
+      fireFlashUntil: 0,
+      mode: 'idle',
+      modeUntil: 0,
       damage(amount) {
         if (!this.alive) return;
         this.hp -= amount;
@@ -462,24 +484,184 @@
   resetRun();
 
   // ---------------------------------------------------------------------------
-  // AI tick — O(N) per frame. Advances animation phase and rotates enemies
-  // within ~6 cells to face the player. No movement this spec.
+  // AI: line-of-sight + per-enemy state machine. Modes:
+  //   idle  — no LOS or LOS just lost; stand still, face the player.
+  //   chase — LOS true and dist > ATTACK_RANGE; walk toward player.
+  //   wind  — LOS true and dist <= ATTACK_RANGE; stop, telegraph red, fire on expiry.
+  //   cool  — post-fire (hit or miss); freeze for ATTACK_COOLDOWN_MS, then re-evaluate.
   // ---------------------------------------------------------------------------
+
+  // True iff a DDA ray from the enemy reaches player.{x,y} before any wall.
+  // Other enemies do NOT block LOS — only walls do.
+  function enemyCanSeePlayer(e) {
+    const dx = player.x - e.x, dy = player.y - e.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1e-6) return true;
+    const rx = dx / dist, ry = dy / dist;
+    let mx = Math.floor(e.x), my = Math.floor(e.y);
+    const stepX = rx < 0 ? -1 : 1;
+    const stepY = ry < 0 ? -1 : 1;
+    const ddx = rx === 0 ? Infinity : Math.abs(1 / rx);
+    const ddy = ry === 0 ? Infinity : Math.abs(1 / ry);
+    let sideX = (rx < 0 ? e.x - mx : mx + 1 - e.x) * ddx;
+    let sideY = (ry < 0 ? e.y - my : my + 1 - e.y) * ddy;
+    let traveled = 0;
+    // Bound the loop; DDA terminates well before this in any 16x16 map.
+    let safety = MAP_W + MAP_H + 4;
+    while (traveled < dist && safety-- > 0) {
+      if (sideX < sideY) { traveled = sideX; sideX += ddx; mx += stepX; }
+      else               { traveled = sideY; sideY += ddy; my += stepY; }
+      if (mx < 0 || my < 0 || mx >= MAP_W || my >= MAP_H) return false;
+      // If we hit a wall before reaching the player's distance, LOS is blocked.
+      // traveled >= dist means the wall sits at-or-past the player — still visible.
+      if (isWall(mx, my)) return traveled >= dist;
+    }
+    return true;
+  }
+
+  // Axis-resolved enemy collision; mirrors the player's moveAxisX/Y but on `e`.
+  function moveEnemyAxisX(e, delta) {
+    if (delta === 0) return;
+    const r = ENEMY_AI_RADIUS;
+    const nx = e.x + delta;
+    const probe = nx + (delta > 0 ? r : -r);
+    const cellX = Math.floor(probe);
+    const cellY1 = Math.floor(e.y - r);
+    const cellY2 = Math.floor(e.y + r);
+    if (!isWall(cellX, cellY1) && !isWall(cellX, cellY2)) {
+      e.x = nx;
+    }
+  }
+  function moveEnemyAxisY(e, delta) {
+    if (delta === 0) return;
+    const r = ENEMY_AI_RADIUS;
+    const ny = e.y + delta;
+    const probe = ny + (delta > 0 ? r : -r);
+    const cellY = Math.floor(probe);
+    const cellX1 = Math.floor(e.x - r);
+    const cellX2 = Math.floor(e.x + r);
+    if (!isWall(cellX1, cellY) && !isWall(cellX2, cellY)) {
+      e.y = ny;
+    }
+  }
+
+  // Soft enemy-vs-enemy separation; O(N^2) over alive pairs (N <= 16).
+  // Smaller push for wind/cool enemies so they don't visibly drift off aim.
+  function separateEnemies() {
+    const r = ENEMY_SEPARATION_R;
+    const r2 = r * r;
+    for (let i = 0; i < enemies.length; i++) {
+      const a = enemies[i];
+      if (!a.alive) continue;
+      for (let j = i + 1; j < enemies.length; j++) {
+        const b = enemies[j];
+        if (!b.alive) continue;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 >= r2) continue;
+        const d = Math.sqrt(d2);
+        if (d < 1e-6) continue;
+        const overlap = r - d;
+        const ux = dx / d, uy = dy / d;
+        const aLocked = a.mode === 'wind' || a.mode === 'cool';
+        const bLocked = b.mode === 'wind' || b.mode === 'cool';
+        const aFactor = aLocked ? 0.15 : 0.5;
+        const bFactor = bLocked ? 0.15 : 0.5;
+        moveEnemyAxisX(a, -ux * overlap * aFactor);
+        moveEnemyAxisY(a, -uy * overlap * aFactor);
+        moveEnemyAxisX(b,  ux * overlap * bFactor);
+        moveEnemyAxisY(b,  uy * overlap * bFactor);
+      }
+    }
+  }
+
+  // Resolve a hitscan shot fired by enemy `e` at the moment its windup expires.
+  // Counts enemyShotsFired regardless of outcome; counts enemyShotsHit only on hit.
+  // Misses if: enemy dead, LOS lost, dist > ATTACK_RANGE+0.5, or wall blocks the ray.
+  function enemyFireShot(e, now) {
+    stats.enemyShotsFired++;
+    e.fireFlashUntil = now + ENEMY_FIRE_FLASH_MS;
+
+    if (!e.alive) return;
+    const dx = player.x - e.x, dy = player.y - e.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > ATTACK_RANGE + 0.5) return;
+    if (!enemyCanSeePlayer(e)) return;
+    if (dist > 1e-6) {
+      const rx = dx / dist, ry = dy / dist;
+      const wallDist = castRay(e.x, e.y, rx, ry);
+      if (wallDist < dist) return;
+    }
+
+    stats.enemyShotsHit++;
+    player.hp -= e.rangedDamage;
+    if (player.hp <= 0) {
+      player.hp = 0;
+      stats.deaths++;
+    }
+  }
+
   function aiTick(dt) {
-    const AGGRO_R2 = 36; // 6 cells, squared
+    const now = performance.now();
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
       if (!e.alive) continue;
       e.animPhase += dt * 4; // ~4 Hz between two frames
-      const dx = player.x - e.x;
-      const dy = player.y - e.y;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < AGGRO_R2 && d2 > 1e-6) {
-        const inv = 1 / Math.sqrt(d2);
-        e.dirX = dx * inv;
-        e.dirY = dy * inv;
+
+      // cool → idle on expiry; let the mode-eval block below pick the next mode.
+      if (e.mode === 'cool' && now >= e.modeUntil) {
+        e.mode = 'idle';
+        e.modeUntil = 0;
       }
+
+      const dx = player.x - e.x, dy = player.y - e.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 1e-6) { e.dirX = dx / dist; e.dirY = dy / dist; }
+
+      // wind → fire & cool on expiry. Fire happens before any cancellation check
+      // so the player can't squeeze a one-frame escape after the windup elapses.
+      if (e.mode === 'wind' && now >= e.modeUntil) {
+        enemyFireShot(e, now);
+        e.mode = 'cool';
+        e.modeUntil = now + ATTACK_COOLDOWN_MS;
+        continue;
+      }
+
+      const seen = enemyCanSeePlayer(e);
+
+      if (e.mode === 'idle') {
+        if (seen && dist <= ATTACK_RANGE) {
+          e.mode = 'wind';
+          e.modeUntil = now + WINDUP_MS;
+        } else if (seen) {
+          e.mode = 'chase';
+        }
+      } else if (e.mode === 'chase') {
+        if (!seen) {
+          e.mode = 'idle';
+        } else if (dist <= ATTACK_RANGE) {
+          e.mode = 'wind';
+          e.modeUntil = now + WINDUP_MS;
+        } else if (dist > 1e-6) {
+          const stepLen = e.moveSpeed * dt;
+          moveEnemyAxisX(e, (dx / dist) * stepLen);
+          moveEnemyAxisY(e, (dy / dist) * stepLen);
+        }
+      } else if (e.mode === 'wind') {
+        // Cancellation: lost LOS or stepped out of range → bail out without
+        // costing a cooldown. Fired windups (above) go to cool instead.
+        if (!seen) {
+          e.mode = 'idle';
+          e.modeUntil = 0;
+        } else if (dist > ATTACK_RANGE + 0.5) {
+          e.mode = 'chase';
+          e.modeUntil = 0;
+        }
+      }
+      // 'cool': hold position; re-evaluated when modeUntil expires next tick.
     }
+
+    separateEnemies();
   }
 
   // DDA along an arbitrary unit ray. Mirrors castColumn's wall logic but
@@ -613,6 +795,8 @@
 
     ctx.putImageData(buf, 0, 0);
 
+    drawEnemyMuzzleFlashes();
+
     // Crosshair: 3-pixel cross in the middle. Tints red briefly after a hit.
     const crossColor = (nowMs < hitTintUntil) ? '#f44' : '#fff';
     ctx.fillStyle = crossColor;
@@ -723,6 +907,7 @@
       const frames = SPRITES[o.e.type];
       const sprite = frames[(o.e.animPhase | 0) & 1];
       const flash = nowMs < o.e.hitFlashUntil;
+      const tint = o.e.mode === 'wind';
 
       const shade = Math.min(1, 5 / (transformY + 0.5));
       const sStep = SPRITE_SIZE / spriteH;
@@ -744,9 +929,14 @@
               if (flash) {
                 buf32[bufIdx] = 0xffffffff; // full white silhouette
               } else {
-                const r = (((c       ) & 0xff) * shade) | 0;
-                const g = (((c >>  8) & 0xff) * shade) | 0;
-                const b = (((c >> 16) & 0xff) * shade) | 0;
+                let r = (((c       ) & 0xff) * shade) | 0;
+                let g = (((c >>  8) & 0xff) * shade) | 0;
+                let b = (((c >> 16) & 0xff) * shade) | 0;
+                if (tint) {
+                  r = r + 80; if (r > 255) r = 255;
+                  g = (g * 0.4) | 0;
+                  b = (b * 0.4) | 0;
+                }
                 buf32[bufIdx] = (255 << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff);
               }
             }
@@ -755,6 +945,35 @@
         }
       }
     }
+  }
+
+  // Single-frame additive flash at each firing enemy's projected screen
+  // position. Drawn over the buf blit so it's cheap and always on top.
+  function drawEnemyMuzzleFlashes() {
+    const invDet = 1.0 / (player.planeX * player.dirY - player.dirX * player.planeY);
+    const halfW = W >> 1;
+    const halfH = H >> 1;
+    let active = false;
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (!e.alive) continue;
+      if (nowMs >= e.fireFlashUntil) continue;
+      const dx = e.x - player.x;
+      const dy = e.y - player.y;
+      const tx = invDet * (player.dirY * dx - player.dirX * dy);
+      const ty = invDet * (-player.planeY * dx + player.planeX * dy);
+      if (ty <= 0.01) continue; // behind / on camera plane
+      const screenX = (halfW * (1 + tx / ty)) | 0;
+      if (screenX < -8 || screenX >= W + 8) continue;
+      if (!active) {
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = 'rgba(255, 220, 80, 0.85)';
+        active = true;
+      }
+      const size = Math.max(3, (16 / ty) | 0);
+      ctx.fillRect(screenX - (size >> 1), halfH - (size >> 1), size, size);
+    }
+    if (active) ctx.globalCompositeOperation = 'source-over';
   }
 
   // Game loop.
