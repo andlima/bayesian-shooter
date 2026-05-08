@@ -125,6 +125,68 @@
   let muzzleFlashUntil = 0;
   let hitTintUntil = 0;
   let nowMs = 0;
+  // Throttles continuous contact-damage SFX so it doesn't fire every frame.
+  let nextContactHurtMs = 0;
+
+  // ---------------------------------------------------------------------------
+  // Audio: lazily-created Web Audio context with a single master gain. Browsers
+  // reject AudioContext creation before a user gesture, so ensureAudio() runs
+  // from the keydown/mousedown handlers and is a silent no-op before then.
+  // Each blip is one fresh OscillatorNode + GainNode that disconnects on end.
+  // ---------------------------------------------------------------------------
+  const MASTER_VOL = 0.4;
+  let audioCtx = null;
+  let masterGain = null;
+  let muted = false;
+
+  function ensureAudio() {
+    if (audioCtx) return;
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return;
+    try {
+      audioCtx = new Ctor();
+    } catch (_) {
+      audioCtx = null;
+      return;
+    }
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = muted ? 0 : MASTER_VOL;
+    masterGain.connect(audioCtx.destination);
+  }
+
+  function blip(opts) {
+    if (!audioCtx) return;
+    const type = opts.type || 'square';
+    const freq = opts.freq != null ? opts.freq : 440;
+    const dur = opts.dur != null ? opts.dur : 0.08;
+    const attack = opts.attack != null ? opts.attack : 0.005;
+    const decay = opts.decay != null ? opts.decay : Math.max(0.005, dur - attack);
+    const peak = opts.peak != null ? opts.peak : 1;
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const env = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+    if (opts.endFreq != null) {
+      osc.frequency.linearRampToValueAtTime(opts.endFreq, t + dur);
+    }
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(peak, t + attack);
+    env.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
+    osc.connect(env);
+    env.connect(masterGain);
+    osc.start(t);
+    osc.stop(t + dur + 0.02);
+    osc.onended = () => {
+      try { osc.disconnect(); env.disconnect(); } catch (_) { /* already gone */ }
+    };
+  }
+
+  function sfxShot()    { blip({ type: 'square',   freq: 220, dur: 0.07, attack: 0.002, decay: 0.06,  peak: 0.7 }); }
+  function sfxHit()     { blip({ type: 'square',   freq: 900, dur: 0.06, attack: 0.002, decay: 0.05,  peak: 0.55 }); }
+  function sfxKill()    { blip({ type: 'sine',     freq: 400, endFreq: 100, dur: 0.18, attack: 0.005, decay: 0.17, peak: 0.6 }); }
+  function sfxHurt()    { blip({ type: 'square',   freq: 120, dur: 0.15, attack: 0.005, decay: 0.14,  peak: 0.55 }); }
+  function sfxDryFire() { blip({ type: 'triangle', freq: 80,  dur: 0.04, attack: 0.001, decay: 0.035, peak: 0.45 }); }
 
   const keys = Object.create(null);
   let mouseDx = 0;
@@ -137,6 +199,7 @@
   ]);
 
   window.addEventListener('keydown', (e) => {
+    ensureAudio();
     const wasDown = !!keys[e.code];
     keys[e.code] = true;
     if (blockedKeys.has(e.code)) e.preventDefault();
@@ -145,6 +208,12 @@
       fireShot();
     } else if (e.code === 'KeyR' && player.hp <= 0) {
       resetRun();
+    } else if (e.code === 'KeyM') {
+      // Mute toggle works even during the death freeze.
+      muted = !muted;
+      if (audioCtx && masterGain) {
+        masterGain.gain.value = muted ? 0 : MASTER_VOL;
+      }
     }
   });
   window.addEventListener('keyup', (e) => {
@@ -163,6 +232,7 @@
   });
   // Once pointer-locked, left-click fires; pre-lock click is for lock-grab.
   canvas.addEventListener('mousedown', (e) => {
+    ensureAudio();
     if (e.button !== 0) return;
     if (!pointerLocked) return;
     e.preventDefault();
@@ -478,6 +548,7 @@
     lastFireTime = -Infinity;
     muzzleFlashUntil = 0;
     hitTintUntil = 0;
+    nextContactHurtMs = 0;
     mouseDx = 0;
     for (const k in keys) keys[k] = false;
   }
@@ -595,6 +666,7 @@
 
     stats.enemyShotsHit++;
     player.hp -= e.rangedDamage;
+    sfxHurt();
     if (player.hp <= 0) {
       player.hp = 0;
       stats.deaths++;
@@ -695,10 +767,15 @@
     if (player.hp <= 0) return;            // frozen death state — no fire
     const now = performance.now();
     if (now - lastFireTime < FIRE_COOLDOWN_MS) return; // cooldown drops input
-    if (ammo <= 0) return;                  // dry trigger — counters untouched
+    if (ammo <= 0) {
+      // Dry trigger — counters untouched, but a distinct click plays.
+      sfxDryFire();
+      return;
+    }
     lastFireTime = now;
     ammo--;
     stats.shotsFired++;
+    sfxShot();
     muzzleFlashUntil = now + MUZZLE_FLASH_MS;
 
     const dWall = castRay(player.x, player.y, player.dirX, player.dirY);
@@ -721,12 +798,14 @@
 
     if (bestE) {
       stats.shotsHit++;
+      sfxHit();
       hitTintUntil = now + HIT_TINT_MS;
       bestE.hitFlashUntil = now + ENEMY_FLASH_MS;
       bestE.hp -= SHOT_DAMAGE;
       if (bestE.hp <= 0) {
         bestE.alive = false;
         stats.kills++;
+        sfxKill();
         ammo = Math.min(MAX_AMMO, ammo + AMMO_REFUND);
       }
     }
@@ -745,6 +824,11 @@
     }
     if (!touching) return;
     player.hp -= CONTACT_DPS * dt;
+    // Throttle: continuous DPS would otherwise stack a buzz every frame.
+    if (nowMs >= nextContactHurtMs) {
+      sfxHurt();
+      nextContactHurtMs = nowMs + 300;
+    }
     if (player.hp <= 0) {
       player.hp = 0;
       stats.deaths++;
@@ -812,6 +896,8 @@
       ctx.globalCompositeOperation = 'source-over';
     }
 
+    drawMinimap();
+
     // FPS counter overlay.
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fillRect(2, 2, 64, 16);
@@ -856,6 +942,88 @@
     ctx.textAlign = 'right';
     ctx.fillText('KILLS ' + stats.kills, W - 4, H - 14);
     ctx.textAlign = 'left';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Minimap: 96x96 px, top-left (8 px inset), centered on the player. Drawn
+  // via ctx after the world blit so the triangle and dots stay crisp.
+  // ---------------------------------------------------------------------------
+  const MM_X = 8;
+  const MM_Y = 8;
+  const MM_SIZE = 96;
+  const MM_CELLS = 12;
+  const MM_CELL_PX = MM_SIZE / MM_CELLS; // 8 px per world cell
+
+  function drawMinimap() {
+    const cellPx = MM_CELL_PX;
+    const half = MM_SIZE / 2;
+    const cx = MM_X + half;
+    const cy = MM_Y + half;
+
+    // Backdrop
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(MM_X, MM_Y, MM_SIZE, MM_SIZE);
+
+    // Player-centered camera in world cells.
+    const originX = player.x - MM_CELLS / 2;
+    const originY = player.y - MM_CELLS / 2;
+    const startX = Math.floor(originX);
+    const startY = Math.floor(originY);
+    const endX = startX + MM_CELLS + 1;
+    const endY = startY + MM_CELLS + 1;
+
+    // Clip so partial cells at the edges don't bleed past the minimap rect.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(MM_X, MM_Y, MM_SIZE, MM_SIZE);
+    ctx.clip();
+
+    for (let my = startY; my <= endY; my++) {
+      if (my < 0 || my >= MAP_H) continue;
+      const row = MAP[my];
+      for (let mx = startX; mx <= endX; mx++) {
+        if (mx < 0 || mx >= MAP_W) continue;
+        const cell = row[mx];
+        if (cell === 0) continue;
+        const sx = (mx - originX) * cellPx + MM_X;
+        const sy = (my - originY) * cellPx + MM_Y;
+        // Approximate the in-world wall colours (brick = red, stone = blue).
+        ctx.fillStyle = (cell === 2) ? '#4a78c8' : '#c8503c';
+        ctx.fillRect(sx, sy, cellPx, cellPx);
+      }
+    }
+
+    // Live enemies as 2x2 red dots (centered on the enemy's cell position).
+    ctx.fillStyle = '#f33';
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (!e.alive) continue;
+      const sx = (e.x - originX) * cellPx + MM_X - 1;
+      const sy = (e.y - originY) * cellPx + MM_Y - 1;
+      if (sx < MM_X - 2 || sx > MM_X + MM_SIZE) continue;
+      if (sy < MM_Y - 2 || sy > MM_Y + MM_SIZE) continue;
+      ctx.fillRect(sx, sy, 2, 2);
+    }
+
+    ctx.restore();
+
+    // Player triangle, rotated to face along (dirX, dirY). The local "tip"
+    // sits at (0, -3) so we subtract pi/2 from atan2 to point screen-up at
+    // dir = (1, 0).
+    const angle = Math.atan2(player.dirY, player.dirX) - Math.PI / 2;
+    const cs = Math.cos(angle), sn = Math.sin(angle);
+    const tri = [[0, -3], [-2, 2], [2, 2]];
+    ctx.fillStyle = '#ff0';
+    ctx.beginPath();
+    for (let i = 0; i < tri.length; i++) {
+      const lx = tri[i][0], ly = tri[i][1];
+      const wx = lx * cs - ly * sn + cx;
+      const wy = lx * sn + ly * cs + cy;
+      if (i === 0) ctx.moveTo(wx, wy);
+      else ctx.lineTo(wx, wy);
+    }
+    ctx.closePath();
+    ctx.fill();
   }
 
   // ---------------------------------------------------------------------------
