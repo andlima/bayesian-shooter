@@ -55,9 +55,10 @@ On phones and tablets, **tap the screen once to start** (this unlocks
 audio), then drag your left thumb anywhere on the left half of the screen
 for a virtual joystick (forward / strafe), drag your right thumb to look,
 and press the red dot at the bottom-right to fire. Tap the small N / L / M
-buttons in the top-left to regenerate / toggle lighting / mute. Pointer
-lock is not used on touch devices, so there is no initial click-to-lock
-step.
+buttons just below the minimap to regenerate / toggle lighting / mute.
+Look rotation slows automatically when your crosshair is near a visible
+enemy — you don't need pixel-perfect aim. Pointer lock is not used on
+touch devices, so there is no initial click-to-lock step.
 
 ## Architecture
 
