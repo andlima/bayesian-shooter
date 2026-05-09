@@ -74,6 +74,12 @@
   const ENEMY_AI_RADIUS = 0.3;
   const ENEMY_SEPARATION_R = 0.6;
   const ENEMY_FIRE_FLASH_MS = 80;
+  // enemy-projectile-attacks: visible, dodgeable straight-line projectiles
+  // replacing the hitscan resolve in enemyFireShot. Velocity locked at spawn.
+  const PROJECTILE_SPEED = 7.0;        // cells per second
+  const PROJECTILE_HIT_RADIUS = 0.35;  // cells; player-collision radius
+  const PROJECTILE_SPAWN_OFFSET = 0.5; // cells; spawn distance ahead of shooter
+  const PROJECTILE_TTL_MS = 2000;      // defensive despawn cap
   // gun-viewmodel: procedural pistol sprite + kick state machine.
   // Times in ms; bob speed in radians/sec scaled by movement intensity.
   // Back-view layout (gun-viewmodel-fps-perspective): slide foreshortened
@@ -711,6 +717,7 @@
     fovPunch += (1.0 - fovPunch) * Math.min(1, FOV_PUNCH_DECAY * dt);
 
     aiTick(dt);
+    tickProjectiles(dt);
     applyContactDamage(dt);
 
     // mobile-touch-controls: held-fire driver. fireShot() already enforces
@@ -1131,10 +1138,64 @@
     '......cccc......',
   ], exitPalette);
 
+  // enemy-projectile-attacks: small bright orbs for imp/grunt fireballs.
+  // Static silhouette; the 2-frame array shape is just compatibility with the
+  // existing `frames[(animPhase|0) & 1]` sprite renderer.
+  const impProjPalette = {
+    'W': rgba32(255, 245, 200), // white-hot core
+    'Y': rgba32(255, 180,  60),
+    'y': rgba32(220,  90,  30),
+  };
+  const impProjFrame = buildFrame([
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '......yyyy......',
+    '.....yYYYYy.....',
+    '.....yYWWYy.....',
+    '.....yYWWYy.....',
+    '.....yYYYYy.....',
+    '......yyyy......',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+  ], impProjPalette);
+
+  const gruntProjPalette = {
+    'W': rgba32(220, 255, 220), // pale green core
+    'C': rgba32(140, 255, 160),
+    'G': rgba32( 60, 180,  90),
+    'g': rgba32( 30,  90,  50),
+  };
+  const gruntProjFrame = buildFrame([
+    '................',
+    '................',
+    '................',
+    '................',
+    '......gggg......',
+    '.....gGGGGg.....',
+    '....gGGCCGGg....',
+    '....gGCWWCGg....',
+    '....gGCWWCGg....',
+    '....gGGCCGGg....',
+    '.....gGGGGg.....',
+    '......gggg......',
+    '................',
+    '................',
+    '................',
+    '................',
+  ], gruntProjPalette);
+
   const SPRITES = {
-    imp:   [impFrame1, impFrame2],
-    grunt: [gruntFrame1, gruntFrame2],
-    exit:  [exitFrame, exitFrame],
+    imp:        [impFrame1, impFrame2],
+    grunt:      [gruntFrame1, gruntFrame2],
+    exit:       [exitFrame, exitFrame],
+    imp_proj:   [impProjFrame, impProjFrame],
+    grunt_proj: [gruntProjFrame, gruntProjFrame],
   };
 
   // ---------------------------------------------------------------------------
@@ -1174,6 +1235,10 @@
   let PLAYER_SPAWN = { x: 1.5, y: 1.5, dirX: 1, dirY: 0, planeX: 0, planeY: 0.66 };
   let EXIT = { cellX: 0, cellY: 0 };
   let enemies = [];
+  // enemy-projectile-attacks: in-flight straight-line projectiles spawned by
+  // enemyFireShot. Compacted in-place each tick; cleared by
+  // clearTransientFeedback on R-restart, N-regen, and level transitions.
+  let projectiles = [];
 
   // level-exit-progression: shared by resetRun() (R after death + N debug regen)
   // and advanceLevel() (exit-step transition). Flushes leftover flashes / pops /
@@ -1205,6 +1270,10 @@
     // is initialized to 1.0, so the IIFE init's call resets 1.0 → 1.0
     // (a no-op that does not affect first-frame determinism).
     fovPunch = 1.0;
+    // enemy-projectile-attacks: in-flight projectiles do not survive R-restart,
+    // N-regen, or level transitions. update()'s death early-return already
+    // freezes them in place during the death state; this clears them on reset.
+    projectiles.length = 0;
     for (const k in keys) keys[k] = false;
   }
 
@@ -1601,38 +1670,55 @@
     else if (e.type === 'grunt') sfxGruntWindup(vol);
   }
 
-  // Resolve a hitscan shot fired by enemy `e` at the moment its windup expires.
-  // Counts enemyShotsFired regardless of outcome; counts enemyShotsHit only on hit.
-  // Misses if: enemy dead, LOS lost, dist > ATTACK_RANGE+0.5, or wall blocks the ray.
+  // enemy-projectile-attacks: spawn-only. Pushes a finite-speed projectile
+  // into `projectiles`; damage resolution happens in tickProjectiles when the
+  // orb intersects the player. Walls absorb silently. enemyShotsFired counts
+  // here at spawn; enemyShotsHit moves to onProjectileHitPlayer.
   function enemyFireShot(e, now) {
     stats.enemyShotsFired++;
     e.fireFlashUntil = now + ENEMY_FIRE_FLASH_MS;
-    // Fire SFX sits above the gates so a windup-completed shot still gets
-    // audible feedback even when the ray ends up blocked or out of range.
+    // Fire SFX sits above the alive guard so a windup-completed shot still
+    // gets audible feedback even on the (defensive) dead-enemy path.
     const fireVol = distanceVolume(e.x, e.y);
     if (e.type === 'imp') sfxImpFire(fireVol);
     else if (e.type === 'grunt') sfxGruntFire(fireVol);
 
     if (!e.alive) return;
+
     const dx = player.x - e.x, dy = player.y - e.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist > ATTACK_RANGE + 0.5) return;
-    if (!enemyCanSeePlayer(e)) return;
-    if (dist > 1e-6) {
-      const rx = dx / dist, ry = dy / dist;
-      const wallDist = castRay(e.x, e.y, rx, ry);
-      if (wallDist < dist) return;
+    const d = Math.hypot(dx, dy);
+    let lockX, lockY;
+    if (d < 1e-6) { lockX = e.dirX; lockY = e.dirY; }
+    else          { lockX = dx / d; lockY = dy / d; }
+
+    let sx = e.x + lockX * PROJECTILE_SPAWN_OFFSET;
+    let sy = e.y + lockY * PROJECTILE_SPAWN_OFFSET;
+    // Defensive: a wall-hugging enemy could spawn the orb embedded in geometry.
+    if (isWall(Math.floor(sx), Math.floor(sy))) {
+      sx = e.x;
+      sy = e.y;
     }
 
-    stats.enemyShotsHit++;
-    player.hp -= e.rangedDamage;
-    sfxHurt();
-    triggerDamageFlash(now);
-    setDamageArrow(e, now);
-    if (player.hp <= 0) {
-      player.hp = 0;
-      stats.deaths++;
-    }
+    projectiles.push({
+      x: sx,
+      y: sy,
+      vx: lockX * PROJECTILE_SPEED,
+      vy: lockY * PROJECTILE_SPEED,
+      // `type` keys directly into SPRITES so drawSprites can reuse the
+      // existing entity pipeline. Damage is captured at spawn so a mid-flight
+      // enemy death cannot retroactively change it.
+      type: e.type === 'grunt' ? 'grunt_proj' : 'imp_proj',
+      damage: TYPE_TABLE[e.type].rangedDamage,
+      sourceX: e.x,
+      sourceY: e.y,
+      alive: true,
+      spawnedAtMs: now,
+      // Duck-type fields read by drawSprites — projectiles never animate or
+      // tint, so these stay at fixed values.
+      animPhase: 0,
+      hitFlashUntil: 0,
+      mode: 'idle',
+    });
   }
 
   function aiTick(dt) {
@@ -1694,6 +1780,60 @@
     }
 
     separateEnemies();
+  }
+
+  // enemy-projectile-attacks: per-frame straight-line integration. Substep
+  // length is capped at 0.25 cells so a fast projectile cannot tunnel through
+  // a 1-cell wall or skip past the player at low frame rates. Dead entries
+  // are compacted in-place to avoid allocations and unbounded iteration cost.
+  function tickProjectiles(dt) {
+    const now = performance.now();
+    const r2 = PROJECTILE_HIT_RADIUS * PROJECTILE_HIT_RADIUS;
+    for (let i = 0; i < projectiles.length; i++) {
+      const p = projectiles[i];
+      if (!p.alive) continue;
+      const travel = PROJECTILE_SPEED * dt;
+      const steps = Math.max(1, Math.ceil(travel / 0.25));
+      const sx = p.vx * dt / steps;
+      const sy = p.vy * dt / steps;
+      for (let s = 0; s < steps; s++) {
+        p.x += sx;
+        p.y += sy;
+        if (isWall(Math.floor(p.x), Math.floor(p.y))) {
+          p.alive = false;
+          break;
+        }
+        const ddx = player.x - p.x, ddy = player.y - p.y;
+        if (ddx * ddx + ddy * ddy <= r2 && player.hp > 0) {
+          p.alive = false;
+          onProjectileHitPlayer(p, now);
+          break;
+        }
+      }
+      if (p.alive && now - p.spawnedAtMs >= PROJECTILE_TTL_MS) {
+        p.alive = false;
+      }
+    }
+    let w = 0;
+    for (let r = 0; r < projectiles.length; r++) {
+      if (projectiles[r].alive) projectiles[w++] = projectiles[r];
+    }
+    projectiles.length = w;
+  }
+
+  // enemy-projectile-attacks: damage + feedback that used to live at the
+  // bottom of enemyFireShot. Uses captured p.damage / p.sourceX / p.sourceY
+  // so a mid-flight enemy death cannot retroactively change the impact.
+  function onProjectileHitPlayer(p, now) {
+    stats.enemyShotsHit++;
+    player.hp -= p.damage;
+    sfxHurt();
+    triggerDamageFlash(now);
+    setDamageArrowFromPoint(p.sourceX, p.sourceY, now);
+    if (player.hp <= 0) {
+      player.hp = 0;
+      stats.deaths++;
+    }
   }
 
   // DDA along an arbitrary unit ray. Mirrors castColumn's wall logic but
@@ -2130,15 +2270,22 @@
     dmgFlashUntil = t + 250;
   }
 
-  function setDamageArrow(srcEnemy, t) {
-    const dx = srcEnemy.x - player.x;
-    const dy = srcEnemy.y - player.y;
+  // enemy-projectile-attacks: arrow source is an arbitrary world-space point so
+  // a projectile can point at the spawn site even after the firing enemy has
+  // moved or died. setDamageArrow(e, t) delegates here for the contact path.
+  function setDamageArrowFromPoint(sx, sy, t) {
+    const dx = sx - player.x;
+    const dy = sy - player.y;
     if (dx === 0 && dy === 0) return;
     dmgArrow = {
       worldAngle: Math.atan2(dy, dx),
       atMs: t,
       untilMs: t + 600,
     };
+  }
+
+  function setDamageArrow(srcEnemy, t) {
+    setDamageArrowFromPoint(srcEnemy.x, srcEnemy.y, t);
   }
 
   function drawDamageEdges() {
@@ -2511,6 +2658,16 @@
       const dx = e.x - px;
       const dy = e.y - py;
       spriteOrder.push({ e, dx, dy, d2: dx * dx + dy * dy, id: i });
+    }
+    // enemy-projectile-attacks: in-flight projectiles share the entity
+    // pipeline. id offset keeps them out of the enemy id range so the
+    // stable-sort tiebreak never interleaves enemies and projectiles.
+    for (let i = 0; i < projectiles.length; i++) {
+      const p = projectiles[i];
+      if (!p.alive) continue;
+      const dx = p.x - px;
+      const dy = p.y - py;
+      spriteOrder.push({ e: p, dx, dy, d2: dx * dx + dy * dy, id: 1000 + i });
     }
     // Push the exit pillar as a synthetic entry. id: -1 keeps the sort
     // stable in the (rare) tie case where a sprite sits at the same d2.
