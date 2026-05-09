@@ -136,6 +136,11 @@
   let MAP = [];
   let MAP_W = 0;
   let MAP_H = 0;
+  // Per-cell theme index (0=crypt, 1=foundry, 2=cavern). Allocated as a
+  // Uint8Array(MAP_W * MAP_H) by generateDungeon and assigned in applyDungeon.
+  // Read directly via THEME_MAP[my * MAP_W + mx] in the floor/ceiling cast hot
+  // path; the bounds-check there guards the dungeon-edge grazing-ray case.
+  let THEME_MAP = null;
 
   // Player state. dir is a unit vector; plane is perpendicular; |plane| ~ 0.66 -> ~66 deg FOV.
   const player = {
@@ -954,19 +959,416 @@
     return tex;
   }
 
+  // Stable per-pixel hash drawn from the same splitmix-style finalizer used for
+  // pickWallVariant. Returns a [0,1) float; lets the noise overlays scatter
+  // without a banding modulo and without consuming PRNG state.
+  function hash01(x, y, seed) {
+    let h = (Math.imul(x, 0x1f1f1f1f) ^ Math.imul(y, 0x9e3779b1) ^ seed) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+    h = (h ^ (h >>> 16)) >>> 0;
+    return h / 4294967296;
+  }
+
+  // crypt accent: blue-green stone with sparse darker moss splotches.
+  function genCryptMossy() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0x7a3c11d9);
+    const base = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(base, 8,  1.00, rand);
+    addOctave(base, 16, 0.55, rand);
+    addOctave(base, 32, 0.30, rand);
+    const moss = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(moss, 8, 1.00, rand);
+    const BR = 72, BG = 124, BB = 104;
+    const MOSS_C = rgba32(40, 80, 56);
+    const NORM = 1.85;
+    for (let i = 0; i < base.length; i++) {
+      const n = base[i] / NORM;
+      const k = 0.55 + n * 0.85;
+      let r = (BR * k) | 0;
+      let g = (BG * k) | 0;
+      let b = (BB * k) | 0;
+      if (r < 0) r = 0; else if (r > 255) r = 255;
+      if (g < 0) g = 0; else if (g > 255) g = 255;
+      if (b < 0) b = 0; else if (b > 255) b = 255;
+      tex[i] = (moss[i] > 0.55) ? MOSS_C : rgba32(r, g, b);
+    }
+    return tex;
+  }
+
+  // foundry base: rust-orange iron in horizontal plates with rivet pixels.
+  function genFoundryIron() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0x12abf055);
+    const PLATE_H = 8;
+    const PLATE_W = 16;
+    const COLS = TEX_SIZE / PLATE_W;
+    const ROWS = TEX_SIZE / PLATE_H;
+    const variation = new Float32Array(ROWS * COLS);
+    for (let i = 0; i < variation.length; i++) variation[i] = 0.78 + rand() * 0.42;
+    const BR = 148, BG = 78, BB = 42;
+    const MORTAR = rgba32(40, 26, 18);
+    const RIVET = rgba32(20, 14, 10);
+    for (let y = 0; y < TEX_SIZE; y++) {
+      const plateRow = (y / PLATE_H) | 0;
+      const ry = y - plateRow * PLATE_H;
+      for (let x = 0; x < TEX_SIZE; x++) {
+        const inX = x % PLATE_W;
+        const plateCol = ((x / PLATE_W) | 0) % COLS;
+        if (ry === 0 || inX === 0) {
+          tex[y * TEX_SIZE + x] = MORTAR;
+          continue;
+        }
+        const v = variation[plateRow * COLS + plateCol];
+        const grain = (rand() - 0.5) * 0.18;
+        let r = (BR * v * (1 + grain)) | 0;
+        let g = (BG * v * (1 + grain)) | 0;
+        let b = (BB * v * (1 + grain)) | 0;
+        if (ry === 1)               { r += 22; g += 10; b += 6; }
+        else if (ry === PLATE_H - 1) { r -= 26; g -= 14; b -= 10; }
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+        tex[y * TEX_SIZE + x] = rgba32(r, g, b);
+      }
+    }
+    // Rivets at each plate's near and far corners (2x2 dark squares).
+    for (let pr = 0; pr < ROWS; pr++) {
+      for (let pc = 0; pc < COLS; pc++) {
+        const baseX = pc * PLATE_W;
+        const baseY = pr * PLATE_H;
+        const cornersX = [baseX + 2, baseX + PLATE_W - 3];
+        const cornersY = [baseY + 2, baseY + PLATE_H - 3];
+        for (let ci = 0; ci < 2; ci++) {
+          for (let cj = 0; cj < 2; cj++) {
+            const rx = cornersX[ci];
+            const ry = cornersY[cj];
+            for (let dy = 0; dy < 2; dy++) {
+              for (let dx = 0; dx < 2; dx++) {
+                const px = rx + dx, py = ry + dy;
+                if (px >= 0 && py >= 0 && px < TEX_SIZE && py < TEX_SIZE) {
+                  tex[py * TEX_SIZE + px] = RIVET;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return tex;
+  }
+
+  // foundry primary accent: dark grey metal sheet with a 2x2 panel grid seam.
+  function genFoundryPanel() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0x4d51e9ab);
+    const field = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(field, 8,  1.00, rand);
+    addOctave(field, 16, 0.40, rand);
+    const NORM = 1.40;
+    const BR = 70, BG = 72, BB = 78;
+    const SEAM = rgba32(28, 28, 32);
+    for (let y = 0; y < TEX_SIZE; y++) {
+      for (let x = 0; x < TEX_SIZE; x++) {
+        const i = y * TEX_SIZE + x;
+        if (x === 32 || y === 32) {
+          tex[i] = SEAM;
+          continue;
+        }
+        const n = field[i] / NORM;
+        const k = 0.7 + n * 0.5;
+        let r = (BR * k) | 0;
+        let g = (BG * k) | 0;
+        let b = (BB * k) | 0;
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+        tex[i] = rgba32(r, g, b);
+      }
+    }
+    return tex;
+  }
+
+  // foundry secondary accent: charred concrete with sparse hot-orange embers.
+  function genFoundryScorch() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0x6f0c8a13);
+    const field = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(field, 16, 1.00, rand);
+    const NORM = 1.00;
+    const BR = 44, BG = 38, BB = 34;
+    const EMBER = rgba32(220, 110, 40);
+    const HASH_SEED = 0x6f0c8a13;
+    for (let y = 0; y < TEX_SIZE; y++) {
+      for (let x = 0; x < TEX_SIZE; x++) {
+        const i = y * TEX_SIZE + x;
+        if (hash01(x, y, HASH_SEED) > 0.95) {
+          tex[i] = EMBER;
+          continue;
+        }
+        const n = field[i] / NORM;
+        const k = 0.55 + n * 0.55;
+        let r = (BR * k) | 0;
+        let g = (BG * k) | 0;
+        let b = (BB * k) | 0;
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+        tex[i] = rgba32(r, g, b);
+      }
+    }
+    return tex;
+  }
+
+  // foundry floor: dark metal plate with diagonal tread.
+  function genFoundryFloor() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0x2c4d7e91);
+    const field = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(field, 8,  1.00, rand);
+    addOctave(field, 16, 0.40, rand);
+    const NORM = 1.40;
+    const BR = 66, BG = 62, BB = 56;
+    for (let y = 0; y < TEX_SIZE; y++) {
+      for (let x = 0; x < TEX_SIZE; x++) {
+        const i = y * TEX_SIZE + x;
+        const n = field[i] / NORM;
+        const k = 0.7 + n * 0.5;
+        let r = (BR * k) | 0;
+        let g = (BG * k) | 0;
+        let b = (BB * k) | 0;
+        if (((x + y) % 8) < 4) {
+          r = (r * 0.85) | 0;
+          g = (g * 0.85) | 0;
+          b = (b * 0.85) | 0;
+        }
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+        tex[i] = rgba32(r, g, b);
+      }
+    }
+    return tex;
+  }
+
+  // foundry ceiling: dark iron with subtle horizontal girder striping.
+  function genFoundryCeiling() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0x9d31a44c);
+    const field = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(field, 16, 1.00, rand);
+    const NORM = 1.00;
+    const BR = 28, BG = 30, BB = 34;
+    for (let y = 0; y < TEX_SIZE; y++) {
+      const stripeMul = ((y % 8) === 0) ? 0.8 : 1.0;
+      for (let x = 0; x < TEX_SIZE; x++) {
+        const i = y * TEX_SIZE + x;
+        const n = field[i] / NORM;
+        const k = (0.6 + n * 0.7) * stripeMul;
+        let r = (BR * k) | 0;
+        let g = (BG * k) | 0;
+        let b = (BB * k) | 0;
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+        tex[i] = rgba32(r, g, b);
+      }
+    }
+    return tex;
+  }
+
+  // cavern base: weathered grey rock with brown undertone, more pitted than crypt_stone.
+  function genCavernRock() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0xa7e21f04);
+    const field = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(field, 8,  1.00, rand);
+    addOctave(field, 16, 0.55, rand);
+    addOctave(field, 32, 0.30, rand);
+    const NORM = 1.85;
+    const BR = 104, BG = 96, BB = 84;
+    for (let i = 0; i < field.length; i++) {
+      const n = field[i] / NORM;
+      const k = 0.5 + n * 0.95;
+      let r = (BR * k) | 0;
+      let g = (BG * k) | 0;
+      let b = (BB * k) | 0;
+      if (r < 0) r = 0; else if (r > 255) r = 255;
+      if (g < 0) g = 0; else if (g > 255) g = 255;
+      if (b < 0) b = 0; else if (b > 255) b = 255;
+      tex[i] = rgba32(r, g, b);
+    }
+    return tex;
+  }
+
+  // cavern primary accent: heavy moss-coated rock with darker speckle clumps.
+  function genCavernMoss() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0x3b9d6e58);
+    const field = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(field, 8,  1.00, rand);
+    addOctave(field, 16, 0.55, rand);
+    addOctave(field, 32, 0.30, rand);
+    const NORM = 1.85;
+    const BR = 58, BG = 110, BB = 62;
+    const SPECK = rgba32(28, 60, 32);
+    const HASH_SEED = 0x3b9d6e58;
+    for (let y = 0; y < TEX_SIZE; y++) {
+      for (let x = 0; x < TEX_SIZE; x++) {
+        const i = y * TEX_SIZE + x;
+        if (hash01(x, y, HASH_SEED) > 0.7) {
+          tex[i] = SPECK;
+          continue;
+        }
+        const n = field[i] / NORM;
+        const k = 0.5 + n * 0.95;
+        let r = (BR * k) | 0;
+        let g = (BG * k) | 0;
+        let b = (BB * k) | 0;
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+        tex[i] = rgba32(r, g, b);
+      }
+    }
+    return tex;
+  }
+
+  // cavern secondary accent: packed earth, warm brown with darker grit.
+  function genCavernDirt() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0xc0892ad1);
+    const field = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(field, 8,  1.00, rand);
+    addOctave(field, 16, 0.55, rand);
+    addOctave(field, 32, 0.30, rand);
+    const NORM = 1.85;
+    const BR = 112, BG = 84, BB = 58;
+    const GRIT = rgba32(56, 36, 22);
+    const HASH_SEED = 0xc0892ad1;
+    for (let y = 0; y < TEX_SIZE; y++) {
+      for (let x = 0; x < TEX_SIZE; x++) {
+        const i = y * TEX_SIZE + x;
+        if (hash01(x, y, HASH_SEED) > 0.78) {
+          tex[i] = GRIT;
+          continue;
+        }
+        const n = field[i] / NORM;
+        const k = 0.5 + n * 0.85;
+        let r = (BR * k) | 0;
+        let g = (BG * k) | 0;
+        let b = (BB * k) | 0;
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+        tex[i] = rgba32(r, g, b);
+      }
+    }
+    return tex;
+  }
+
+  // cavern floor: wet earthen rock with sparse darker puddles.
+  function genCavernFloor() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0x8e4471a3);
+    const field = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(field, 8,  1.00, rand);
+    addOctave(field, 16, 0.55, rand);
+    const puddle = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(puddle, 8, 1.00, rand);
+    const NORM = 1.55;
+    const BR = 78, BG = 68, BB = 54;
+    for (let i = 0; i < field.length; i++) {
+      const n = field[i] / NORM;
+      const k = 0.55 + n * 0.85;
+      let r = (BR * k) | 0;
+      let g = (BG * k) | 0;
+      let b = (BB * k) | 0;
+      if (puddle[i] > 0.62) {
+        r = (r * 0.55) | 0;
+        g = (g * 0.55) | 0;
+        b = (b * 0.55) | 0;
+      }
+      if (r < 0) r = 0; else if (r > 255) r = 255;
+      if (g < 0) g = 0; else if (g > 255) g = 255;
+      if (b < 0) b = 0; else if (b > 255) b = 255;
+      tex[i] = rgba32(r, g, b);
+    }
+    return tex;
+  }
+
+  // cavern ceiling: rough cave roof, two-octave noise.
+  function genCavernCeiling() {
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0xe27ab50f);
+    const field = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(field, 8,  1.00, rand);
+    addOctave(field, 16, 0.55, rand);
+    const NORM = 1.55;
+    const BR = 42, BG = 38, BB = 34;
+    for (let i = 0; i < field.length; i++) {
+      const n = field[i] / NORM;
+      const k = 0.55 + n * 0.9;
+      let r = (BR * k) | 0;
+      let g = (BG * k) | 0;
+      let b = (BB * k) | 0;
+      if (r < 0) r = 0; else if (r > 255) r = 255;
+      if (g < 0) g = 0; else if (g > 255) g = 255;
+      if (b < 0) b = 0; else if (b > 255) b = 255;
+      tex[i] = rgba32(r, g, b);
+    }
+    return tex;
+  }
+
   const TEXTURES = {
-    brick:   genBrick(),
-    stone:   genStone(),
-    floor:   genFloor(),
-    ceiling: genCeiling(),
+    crypt_brick:     genBrick(),
+    crypt_stone:     genStone(),
+    crypt_mossy:     genCryptMossy(),
+    foundry_iron:    genFoundryIron(),
+    foundry_panel:   genFoundryPanel(),
+    foundry_scorch:  genFoundryScorch(),
+    foundry_floor:   genFoundryFloor(),
+    foundry_ceiling: genFoundryCeiling(),
+    cavern_rock:     genCavernRock(),
+    cavern_moss:     genCavernMoss(),
+    cavern_dirt:     genCavernDirt(),
+    cavern_floor:    genCavernFloor(),
+    cavern_ceiling:  genCavernCeiling(),
+    crypt_floor:     genFloor(),
+    crypt_ceiling:   genCeiling(),
   };
 
-  // MAP cell value -> wall texture. Adding a new wall type is a one-line edit
-  // here, never a branch in the inner render loop.
-  const WALL_TEX = {
-    1: TEXTURES.brick,
-    2: TEXTURES.stone,
-  };
+  // Theme contract: index in this array == themeIdx everywhere else (THEME_MAP
+  // cell values, MM_THEME_COLOR slots, the (themeIdx*3+variant+1) wall index).
+  const THEMES = ['crypt', 'foundry', 'cavern'];
+
+  // MAP cell value -> wall texture. 0 reserved for empty cells; 1..9 are
+  // themeIdx*3 + variant + 1, mirroring THEMES order. Slot 0 is intentionally
+  // left null so a stray 0 lookup falls through to the WALL_VARIANTS[1] guard
+  // in render() instead of silently picking some texture.
+  const WALL_VARIANTS = [
+    null,
+    TEXTURES.crypt_brick,    // 1: crypt base
+    TEXTURES.crypt_stone,    // 2: crypt primary accent
+    TEXTURES.crypt_mossy,    // 3: crypt secondary accent
+    TEXTURES.foundry_iron,   // 4: foundry base
+    TEXTURES.foundry_panel,  // 5: foundry primary accent
+    TEXTURES.foundry_scorch, // 6: foundry secondary accent
+    TEXTURES.cavern_rock,    // 7: cavern base
+    TEXTURES.cavern_moss,    // 8: cavern primary accent
+    TEXTURES.cavern_dirt,    // 9: cavern secondary accent
+  ];
+  const FLOOR_VARIANTS = [
+    TEXTURES.crypt_floor,
+    TEXTURES.foundry_floor,
+    TEXTURES.cavern_floor,
+  ];
+  const CEIL_VARIANTS = [
+    TEXTURES.crypt_ceiling,
+    TEXTURES.foundry_ceiling,
+    TEXTURES.cavern_ceiling,
+  ];
 
   // ---------------------------------------------------------------------------
   // atmosphere-lighting: distance fog and a vignette post-pass. Names + numeric
@@ -1328,6 +1730,22 @@
     return Math.floor(Math.random() * 0x100000000) >>> 0;
   }
 
+  // Stable per-cell wall variant selection: same (x, y, seed) -> same variant,
+  // independent of iteration order. Splitmix32-style finalizer keyed on the
+  // dungeon seed so re-renders of the same level pick identical variants.
+  // Returns 0 (base, 50%), 1 (primary accent, 30%), or 2 (secondary accent,
+  // 20%).
+  function pickWallVariant(x, y, seed) {
+    let h = (Math.imul(x, 0x1f1f1f1f) ^ Math.imul(y, 0x9e3779b1) ^ seed) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+    h = (h ^ (h >>> 16)) >>> 0;
+    const r = h % 100;
+    if (r < 50) return 0;
+    if (r < 80) return 1;
+    return 2;
+  }
+
   function generateDungeon(seed) {
     const rand = mulberry32(seed);
     // 48x48 grid, in the spec's required 40-60 range.
@@ -1396,31 +1814,6 @@
         }
       }
 
-      // Assign wall types: weighted per-cell (~70% brick, ~30% stone). The
-      // count guard below forces a flip in the (essentially impossible) case
-      // where one type ended up at zero so the spec's "both types present"
-      // requirement is never silently violated.
-      let count1 = 0, count2 = 0;
-      for (let y = 0; y < H; y++) {
-        for (let x = 0; x < W; x++) {
-          if (map[y][x] !== 0) {
-            const t = rand() < 0.7 ? 1 : 2;
-            map[y][x] = t;
-            if (t === 1) count1++; else count2++;
-          }
-        }
-      }
-      if (count1 === 0 || count2 === 0) {
-        outer: for (let y = 0; y < H; y++) {
-          for (let x = 0; x < W; x++) {
-            if (map[y][x] !== 0) {
-              map[y][x] = (count1 === 0) ? 1 : 2;
-              break outer;
-            }
-          }
-        }
-      }
-
       // Pick starting room and player spawn at its center, facing a random
       // cardinal direction. plane is perpendicular to dir with magnitude 0.66.
       const startIdx = Math.floor(rand() * rooms.length);
@@ -1485,6 +1878,60 @@
         y: er.y + ((er.h / 2) | 0),
       };
 
+      // Assign a theme to each room. No diversity guard — a level may end up
+      // single-theme if RNG lands that way; that's just a thematic level.
+      for (let r = 0; r < rooms.length; r++) {
+        rooms[r].themeIdx = Math.floor(rand() * THEMES.length);
+      }
+
+      // Multi-source BFS to label every cell with its nearest room's theme.
+      // Seeds the queue with all room-interior floor cells simultaneously, then
+      // propagates outward into corridor floor cells and finally into wall
+      // cells. Tie-break is "first seeded wins" by room iteration order — so
+      // the result is deterministic given the seeded room theme assignment.
+      const themeMap = new Uint8Array(W * H);
+      const tDist = new Int16Array(W * H);
+      tDist.fill(-1);
+      const tQueue = new Int32Array(W * H);
+      let tHead = 0, tTail = 0;
+      for (let r = 0; r < rooms.length; r++) {
+        const room = rooms[r];
+        for (let yy = room.y; yy < room.y + room.h; yy++) {
+          for (let xx = room.x; xx < room.x + room.w; xx++) {
+            const i = yy * W + xx;
+            themeMap[i] = room.themeIdx;
+            tDist[i] = 0;
+            tQueue[tTail++] = i;
+          }
+        }
+      }
+      while (tHead < tTail) {
+        const i = tQueue[tHead++];
+        const cx = i % W, cy = (i / W) | 0;
+        for (let n = 0; n < 4; n++) {
+          const nx = cx + dxs[n], ny = cy + dys[n];
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const ni = ny * W + nx;
+          if (tDist[ni] !== -1) continue;
+          tDist[ni] = tDist[i] + 1;
+          themeMap[ni] = themeMap[i];
+          tQueue[tTail++] = ni;
+        }
+      }
+
+      // Per-cell wall variant selection. The map cell value 1..9 is encoded
+      // as themeIdx*3 + variant + 1, with slot 0 reserved for empty cells.
+      // Hash-based variant pick is order-independent — same (x, y, seed)
+      // always returns the same variant.
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          if (map[y][x] !== 0) {
+            const variant = pickWallVariant(x, y, seed);
+            map[y][x] = themeMap[y * W + x] * 3 + variant + 1;
+          }
+        }
+      }
+
       // Enemy spawns: 1-3 per non-starting room at distinct interior floor
       // cells, capped at MAX_ENEMIES total. Type chosen per-spawn from the
       // existing TYPE_TABLE (imp / grunt only).
@@ -1516,7 +1963,7 @@
         }
       }
 
-      return { map, mapW: W, mapH: H, rooms, playerSpawn, enemySpawns: newSpawns, exitCell, seed };
+      return { map, mapW: W, mapH: H, rooms, playerSpawn, enemySpawns: newSpawns, exitCell, themeMap, seed };
     }
     // Should be unreachable with sane parameters; guard against silent failure.
     throw new Error('dungeon generation failed after retries');
@@ -1526,6 +1973,7 @@
     MAP = d.map;
     MAP_W = d.mapW;
     MAP_H = d.mapH;
+    THEME_MAP = d.themeMap;
     PLAYER_SPAWN = d.playerSpawn;
     enemySpawns = d.enemySpawns;
     EXIT = { cellX: d.exitCell.x, cellY: d.exitCell.y };
@@ -1969,8 +2417,6 @@
   // different texture. The lighting branch is hoisted out of the inner x
   // loop so per-pixel work stays integer-only.
   function castFloorCeiling() {
-    const FLOOR_TEX = TEXTURES.floor;
-    const CEIL_TEX  = TEXTURES.ceiling;
     const rayDirX0 = player.dirX - player.planeX * fovPunch;
     const rayDirY0 = player.dirY - player.planeY * fovPunch;
     const rayDirX1 = player.dirX + player.planeX * fovPunch;
@@ -1998,6 +2444,14 @@
         const it = (t * 256) | 0;
         const ib = 256 - it;
         for (let xx = 0; xx < W; xx++) {
+          const mx = fx | 0;
+          const my = fy | 0;
+          let theme = 0;
+          if (mx >= 0 && mx < MAP_W && my >= 0 && my < MAP_H) {
+            theme = THEME_MAP[my * MAP_W + mx];
+          }
+          const FLOOR_TEX = FLOOR_VARIANTS[theme];
+          const CEIL_TEX  = CEIL_VARIANTS[theme];
           const tx = ((fx * TEX_SIZE) | 0) & TEX_MASK;
           const ty = ((fy * TEX_SIZE) | 0) & TEX_MASK;
           const idx = ty * TEX_SIZE + tx;
@@ -2018,6 +2472,14 @@
         const shade = Math.min(1, 5 / (rowDist + 0.5));
         const shadeI = (shade * 256) | 0;
         for (let xx = 0; xx < W; xx++) {
+          const mx = fx | 0;
+          const my = fy | 0;
+          let theme = 0;
+          if (mx >= 0 && mx < MAP_W && my >= 0 && my < MAP_H) {
+            theme = THEME_MAP[my * MAP_W + mx];
+          }
+          const FLOOR_TEX = FLOOR_VARIANTS[theme];
+          const CEIL_TEX  = CEIL_VARIANTS[theme];
           const tx = ((fx * TEX_SIZE) | 0) & TEX_MASK;
           const ty = ((fy * TEX_SIZE) | 0) & TEX_MASK;
           const idx = ty * TEX_SIZE + tx;
@@ -2056,7 +2518,7 @@
       const d = hit.perpWallDist;
       zBuffer[x] = d;
 
-      const tex = WALL_TEX[hit.wallType] || TEXTURES.brick;
+      const tex = WALL_VARIANTS[hit.wallType] || WALL_VARIANTS[1];
       const rayDirX = hit.rayDirX;
       const rayDirY = hit.rayDirY;
 
@@ -2544,6 +3006,10 @@
   const MM_SIZE = 96;
   const MM_CELLS = 12;
   const MM_CELL_PX = MM_SIZE / MM_CELLS; // 8 px per world cell
+  // Per-theme minimap fill colors. Indexed by THEME_MAP cell value
+  // (0=crypt, 1=foundry, 2=cavern). Functional dots — instantly recognizable
+  // per theme at minimap scale, not pixel-accurate samples of the wall textures.
+  const MM_THEME_COLOR = ['#c8503c', '#a06038', '#5c8a48'];
 
   function drawMinimap() {
     const cellPx = MM_CELL_PX;
@@ -2578,8 +3044,8 @@
         if (cell === 0) continue;
         const sx = (mx - originX) * cellPx + MM_X;
         const sy = (my - originY) * cellPx + MM_Y;
-        // Approximate the in-world wall colours (brick = red, stone = blue).
-        ctx.fillStyle = (cell === 2) ? '#4a78c8' : '#c8503c';
+        const t = THEME_MAP[my * MAP_W + mx];
+        ctx.fillStyle = MM_THEME_COLOR[t];
         ctx.fillRect(sx, sy, cellPx, cellPx);
       }
     }
