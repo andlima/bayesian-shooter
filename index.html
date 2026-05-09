@@ -271,11 +271,21 @@
   const JOY_RADIUS = 40, JOY_DEADZONE = 0.15;
   const FIRE_BTN_R = 28;
   const BTN_W = 22, BTN_H = 18;
-  const joyVec    = { active: false, id: -1, ax: 0, ay: 0, x: 0, y: 0 };
+  const BTN_R = 4; // mobile-touch-polish: rounded-rect corner radius
+  const joyVec    = { active: false, fading: false, id: -1, ax: 0, ay: 0, x: 0, y: 0, shownAtMs: 0, hiddenAtMs: 0 };
   const lookTouch = { active: false, id: -1, lastX: 0, lastY: 0 };
   const fireTouch = { active: false, id: -1 };
   let firePressed = false;
-  const touches = new Map(); // id -> role: 'joy'|'look'|'fire'|'util'
+  const touches = new Map(); // id -> role: 'joy'|'look'|'fire'|'util:<label>'
+  // mobile-touch-polish: per-button press timestamps for visual feedback.
+  // 0 = not pressed; nowMs at touchstart, cleared on touchend / touchcancel.
+  const utilPressed = { N: 0, L: 0, M: 0, RESET: 0 };
+  // mobile-touch-polish: flips true on first touch to dismiss the
+  // tap-to-begin overlay. Stays true across resetRun().
+  let audioStarted = false;
+  // mobile-touch-polish: per-session look-sensitivity multiplier set once
+  // on the first RAF after canvas sizing has stabilised. Stays 1 on desktop.
+  let touchLookScale = 1;
 
   window.addEventListener('keydown', (e) => {
     ensureAudio();
@@ -373,6 +383,10 @@
 
   function onTouchStart(e) {
     ensureAudio();
+    // mobile-touch-polish: set immediately after ensureAudio() so even if
+    // the rest of the handler errors out, the tap-to-begin overlay
+    // dismisses on the next frame.
+    audioStarted = true;
     e.preventDefault();
     for (let i = 0; i < e.changedTouches.length; i++) {
       const t = e.changedTouches[i];
@@ -381,7 +395,9 @@
       // Util buttons take priority — edge-triggered tap.
       const util = utilButtonAt(fb.x, fb.y);
       if (util) {
-        touches.set(t.identifier, 'util');
+        const label = (util === 'reset') ? 'RESET' : util;
+        utilPressed[label] = nowMs;
+        touches.set(t.identifier, 'util:' + label);
         if (util === 'reset') {
           resetRun();
         } else if (util === 'N') {
@@ -411,11 +427,14 @@
       if (fb.x < W / 2) {
         if (!joyVec.active) {
           joyVec.active = true;
+          joyVec.fading = false;
           joyVec.id = t.identifier;
           joyVec.ax = fb.x;
           joyVec.ay = fb.y;
           joyVec.x = 0;
           joyVec.y = 0;
+          joyVec.shownAtMs = nowMs;
+          joyVec.hiddenAtMs = 0;
           touches.set(t.identifier, 'joy');
         }
         continue;
@@ -457,9 +476,10 @@
       } else if (role === 'look' && lookTouch.active && lookTouch.id === t.identifier) {
         // Feed the framebuffer-px delta into the same mouseDx accumulator
         // the desktop path uses; update() applies mouseSens once and
-        // rotates the camera. At typical phone widths a framebuffer-px is
-        // close to a CSS-px so this reads as native-feeling sensitivity.
-        mouseDx += fb.x - lookTouch.lastX;
+        // rotates the camera. The touchLookScale multiplier (set once at
+        // startup, see RAF defer below) compensates for canvas widths that
+        // are very different from W = 480 fb-px.
+        mouseDx += (fb.x - lookTouch.lastX) * touchLookScale;
         lookTouch.lastX = fb.x;
         lookTouch.lastY = fb.y;
       }
@@ -475,8 +495,11 @@
       if (!role) continue;
       touches.delete(t.identifier);
       if (role === 'joy' && joyVec.id === t.identifier) {
-        joyVec.active = false;
-        joyVec.id = -1;
+        // mobile-touch-polish: defer clearing active/id/ax/ay until the
+        // fade-out completes in drawTouchHUD(). Defensive zero of x/y so
+        // the input gate (active && !fading) is doubly safe.
+        joyVec.fading = true;
+        joyVec.hiddenAtMs = nowMs;
         joyVec.x = 0;
         joyVec.y = 0;
       } else if (role === 'look' && lookTouch.id === t.identifier) {
@@ -486,6 +509,9 @@
         fireTouch.active = false;
         fireTouch.id = -1;
         firePressed = false;
+      } else if (role.startsWith('util:')) {
+        const label = role.slice(5);
+        utilPressed[label] = 0;
       }
     }
   }
@@ -572,7 +598,7 @@
     // = strafe right. The normalize below caps magnitude so a hybrid
     // touch-laptop user pressing W and pushing the joystick still moves
     // at exactly moveSpeed.
-    if (isTouchDevice && joyVec.active) {
+    if (isTouchDevice && joyVec.active && !joyVec.fading) {
       mvX += player.dirX * (-joyVec.y) + player.planeX * joyVec.x;
       mvY += player.dirY * (-joyVec.y) + player.planeY * joyVec.x;
     }
@@ -1883,9 +1909,14 @@
     drawEnemyMuzzleFlashes();
 
     // Crosshair: 3-pixel cross in the middle. Tints red briefly after a hit.
+    // 1-px black outline (drawn first, beneath) keeps the crosshair legible
+    // against bright walls on both desktop and touch.
     const crossColor = (nowMs < hitTintUntil) ? '#f44' : '#fff';
-    ctx.fillStyle = crossColor;
     const cx = W >> 1, cy = H >> 1;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(cx - 2, cy - 1, 5, 3);
+    ctx.fillRect(cx - 1, cy - 2, 3, 5);
+    ctx.fillStyle = crossColor;
     ctx.fillRect(cx - 1, cy, 3, 1);
     ctx.fillRect(cx, cy - 1, 1, 3);
 
@@ -1925,11 +1956,6 @@
 
     drawHUD();
 
-    // mobile-touch-controls: touch HUD overlays (joystick / fire / util row
-    // or RESET). Early-returns on desktop. Sits above drawHUD strip but
-    // below the damage arrow / death overlay / level banner.
-    drawTouchHUD();
-
     // hud-feedback-polish: damage arrow draws on top of the HUD strip so it
     // stays visible when the player is huddled in a corner; under death overlay.
     drawDamageArrow();
@@ -1961,8 +1987,40 @@
       ctx.font = '12px monospace';
       ctx.textBaseline = 'top';
       ctx.textAlign = 'center';
-      ctx.fillText('YOU DIED — press R to restart', W >> 1, (H >> 1) - 6);
+      const deathText = isTouchDevice
+        ? 'YOU DIED — tap RESET to restart'
+        : 'YOU DIED — press R to restart';
+      ctx.fillText(deathText, W >> 1, (H >> 1) - 6);
       ctx.textAlign = 'left';
+    }
+
+    // mobile-touch-controls: touch HUD overlays (joystick / fire / util
+    // row or RESET). Early-returns on desktop. Drawn after the death
+    // overlay so RESET / util buttons are not dimmed by it.
+    drawTouchHUD();
+
+    // mobile-touch-polish: tap-to-begin overlay. Drawn last so it sits
+    // above everything (including the death overlay and touchHUD). One-
+    // shot: gated on isTouchDevice && !audioStarted, so desktop pays a
+    // single boolean check per frame.
+    if (isTouchDevice && !audioStarted) {
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0, 0, W, H);
+      const panelW = 160, panelH = 32;
+      const px = ((W - panelW) >> 1), py = ((H - panelH) >> 1);
+      ctx.fillStyle   = 'rgba(0,0,0,0.55)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+      ctx.lineWidth = 1;
+      roundRect(px, py, panelW, panelH, BTN_R);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.font = '14px monospace';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'center';
+      ctx.fillText('TAP TO BEGIN', px + panelW / 2, py + panelH / 2);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
     }
   }
 
@@ -2044,44 +2102,78 @@
     ctx.textBaseline = 'top';
   }
 
+  // mobile-touch-polish: 4-corner rounded-rect path builder. Builds a
+  // path via moveTo + arcTo so callers can stroke and / or fill on the
+  // same path. Caller is responsible for beginPath / fill / stroke.
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y,     x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x,     y + h, r);
+    ctx.arcTo(x,     y + h, x,     y,     r);
+    ctx.arcTo(x,     y,     x + w, y,     r);
+    ctx.closePath();
+  }
+
   // mobile-touch-controls: render the touch HUD overlay (joystick base /
   // thumb when active, fire button, util row or RESET when dead). Drawn
   // in framebuffer coordinates so its hit-test math (in the same pixel
   // space) and visual pixels stay locked together.
   function drawTouchHUD() {
     if (!isTouchDevice) return;
-    // Joystick — only when active.
+    // mobile-touch-polish: joystick fades in / out over FADE_MS via an
+    // ease-linear alpha envelope. Input is gated on active && !fading in
+    // update(), so the fade-out doesn't keep moving the player.
+    const FADE_MS = 120;
+    let joyAlpha = 0;
     if (joyVec.active) {
+      if (joyVec.fading) {
+        joyAlpha = Math.max(0, 1 - (nowMs - joyVec.hiddenAtMs) / FADE_MS);
+        if (joyAlpha === 0) {
+          joyVec.active = false;
+          joyVec.fading = false;
+          joyVec.id = -1;
+          joyVec.x = 0;
+          joyVec.y = 0;
+        }
+      } else {
+        joyAlpha = Math.min(1, (nowMs - joyVec.shownAtMs) / FADE_MS);
+      }
+    }
+    if (joyVec.active && joyAlpha > 0) {
       ctx.lineWidth = 1;
-      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.25 * joyAlpha).toFixed(3) + ')';
       ctx.beginPath();
       ctx.arc(joyVec.ax, joyVec.ay, JOY_RADIUS, 0, Math.PI * 2);
       ctx.stroke();
       const tx = joyVec.ax + joyVec.x * JOY_RADIUS;
       const ty = joyVec.ay + joyVec.y * JOY_RADIUS;
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.35 * joyAlpha).toFixed(3) + ')';
       ctx.beginPath();
       ctx.arc(tx, ty, 12, 0, Math.PI * 2);
       ctx.fill();
     }
-    // Fire button.
+    // Fire button (circle — softer resting fill so the red pressed state
+    // stands out more; press visual is immediate per AC #3).
     ctx.lineWidth = 1;
     ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.fillStyle = firePressed ? 'rgba(255,80,80,0.25)' : 'rgba(255,255,255,0.10)';
+    ctx.fillStyle = firePressed ? 'rgba(255,80,80,0.25)' : 'rgba(255,255,255,0.06)';
     ctx.beginPath();
     ctx.arc(W - 36, H - 36, FIRE_BTN_R, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-    // Util row / RESET.
+    // Util row / RESET — rounded-rect background with press-state palette.
     ctx.font = '12px monospace';
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
     if (player.hp <= 0) {
       const x = (W / 2) - 40, y = (H / 2) + 32;
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fillRect(x, y, 80, 24);
-      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-      ctx.strokeRect(x + 0.5, y + 0.5, 79, 23);
+      const pressed = utilPressed.RESET !== 0;
+      ctx.fillStyle   = pressed ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.55)';
+      ctx.strokeStyle = pressed ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.65)';
+      roundRect(x, y, 80, 24, BTN_R);
+      ctx.fill();
+      ctx.stroke();
       ctx.fillStyle = '#fff';
       ctx.fillText('RESET', x + 40, y + 12);
     } else {
@@ -2090,12 +2182,24 @@
       const xs = [2, 26, 50];
       for (let i = 0; i < 3; i++) {
         const x = xs[i];
-        ctx.fillStyle = 'rgba(0,0,0,0.45)';
-        ctx.fillRect(x, y0, BTN_W, BTN_H);
-        ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-        ctx.strokeRect(x + 0.5, y0 + 0.5, BTN_W - 1, BTN_H - 1);
+        const label = labels[i];
+        const pressed = utilPressed[label] !== 0;
+        ctx.fillStyle   = pressed ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.55)';
+        ctx.strokeStyle = pressed ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.65)';
+        roundRect(x, y0, BTN_W, BTN_H, BTN_R);
+        ctx.fill();
+        ctx.stroke();
         ctx.fillStyle = '#fff';
-        ctx.fillText(labels[i], x + BTN_W / 2, y0 + BTN_H / 2);
+        ctx.fillText(label, x + BTN_W / 2, y0 + BTN_H / 2);
+        // Mute indicator: 1-px diagonal strikethrough through the M label.
+        if (label === 'M' && muted) {
+          ctx.strokeStyle = 'rgba(255,80,80,0.9)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x + 3,           y0 + 3);
+          ctx.lineTo(x + BTN_W - 3,   y0 + BTN_H - 3);
+          ctx.stroke();
+        }
       }
     }
     // Restore defaults the rest of the HUD code expects.
@@ -2131,21 +2235,26 @@
   }
 
   function drawHUD() {
+    // mobile-touch-polish: bump strip + font on touch so HP/AMMO/LEVEL/KILLS
+    // are readable at thumb-distance. Desktop branch stays byte-identical.
+    const HUD_FONT_PX = isTouchDevice ? 14 : 12;
+    const HUD_STRIP_H = isTouchDevice ? 22 : 18;
+    const textY = H - HUD_STRIP_H + 4;
     const hpFrac = Math.max(0, Math.min(1, player.hp / MAX_HP));
     // HUD strip background to keep text legible against any wall colour.
     ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(0, H - 18, W, 18);
-    // Thin red HP bar above the readouts.
+    ctx.fillRect(0, H - HUD_STRIP_H, W, HUD_STRIP_H);
+    // Thin red HP bar always sits exactly 2 px above the strip.
     ctx.fillStyle = '#400';
-    ctx.fillRect(0, H - 20, W, 2);
+    ctx.fillRect(0, H - HUD_STRIP_H - 2, W, 2);
     ctx.fillStyle = '#e22';
-    ctx.fillRect(0, H - 20, (W * hpFrac) | 0, 2);
+    ctx.fillRect(0, H - HUD_STRIP_H - 2, (W * hpFrac) | 0, 2);
 
-    ctx.font = '12px monospace';
+    ctx.font = HUD_FONT_PX + 'px monospace';
     ctx.textBaseline = 'top';
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'left';
-    ctx.fillText('HP   ' + (Math.ceil(player.hp) | 0), 4, H - 14);
+    ctx.fillText('HP   ' + (Math.ceil(player.hp) | 0), 4, textY);
 
     // hud-feedback-polish: AMMO turns warning-red at 5 and pulses at 0.
     let ammoColor = '#fff';
@@ -2157,16 +2266,16 @@
     }
     ctx.fillStyle = ammoColor;
     ctx.textAlign = 'center';
-    ctx.fillText('AMMO  ' + ammo + ' / ' + MAX_AMMO, (W * 0.40) | 0, H - 14);
+    ctx.fillText('AMMO  ' + ammo + ' / ' + MAX_AMMO, (W * 0.40) | 0, textY);
 
     // level-exit-progression: LEVEL readout sits between AMMO and KILLS.
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
-    ctx.fillText('LEVEL ' + level, (W * 0.65) | 0, H - 14);
+    ctx.fillText('LEVEL ' + level, (W * 0.65) | 0, textY);
 
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'right';
-    ctx.fillText('KILLS ' + stats.kills, W - 4, H - 14);
+    ctx.fillText('KILLS ' + stats.kills, W - 4, textY);
     ctx.textAlign = 'left';
   }
 
@@ -2715,6 +2824,18 @@
         }
       }
     }
+  }
+
+  // mobile-touch-polish: one-shot look-sensitivity auto-tune. canvas.clientWidth
+  // can be 0 during initial IIFE execution, so defer one frame. Map fb-px
+  // touch deltas back to a CSS-px-equivalent feel; clamp to a sane range so
+  // odd viewports don't go wild. Fixed for the session — does not recompute
+  // on resize / orientation change.
+  if (isTouchDevice) {
+    requestAnimationFrame(() => {
+      const cw = canvas.clientWidth || W;
+      touchLookScale = Math.max(0.6, Math.min(2.0, cw / W));
+    });
   }
 
   // Game loop.
