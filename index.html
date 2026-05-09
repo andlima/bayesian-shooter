@@ -268,6 +268,11 @@
       if (audioCtx && masterGain) {
         masterGain.gain.value = muted ? 0 : MASTER_VOL;
       }
+    } else if (e.code === 'KeyL') {
+      // atmosphere-lighting: visual debug toggle. Surfaces a small text
+      // indicator for ~2 s; otherwise no HUD presence.
+      lightingEnabled = !lightingEnabled;
+      lightingToggledAtMs = nowMs;
     }
   });
   window.addEventListener('keyup', (e) => {
@@ -464,6 +469,74 @@
   const HALF_H = (H / 2) | 0;
   const CEIL_C  = rgba32(28, 32, 50);
   const FLOOR_C = rgba32(70, 60, 50);
+
+  // ---------------------------------------------------------------------------
+  // atmosphere-lighting: distance fog, sky/ground gradients, and a vignette
+  // post-pass. Names + numeric meanings here are the spec contract — renaming
+  // them under your watch breaks downstream tuning specs.
+  // ---------------------------------------------------------------------------
+  const FOG_C = rgba32(70, 80, 110);  // desaturated blue-grey horizon
+  const FOG_NEAR = 1.5;               // cells; no fog closer than this
+  const FOG_FAR = 14.0;               // cells; fully fogged at/past this
+  const SKY_TOP = rgba32(20, 24, 48);
+  const GROUND_C = rgba32(60, 50, 40);
+  const VIGNETTE_INNER = 0.55;        // normalized r at which darkening starts
+  const VIGNETTE_OUTER = 1.05;        // normalized r at which it saturates
+  const VIGNETTE_DARKEN = 0.55;       // 1.0 = no effect, 0.0 = pure black
+
+  // Per-row sky and ground colors. Sky goes SKY_TOP -> FOG_C from y=0 to
+  // y=HALF_H-1; ground goes FOG_C -> GROUND_C from y=HALF_H to y=H-1, so
+  // both rails meet FOG_C at the horizon and the wall fog reads continuous
+  // with the sky/ground at any view angle.
+  const SKY_ROW = new Uint32Array(HALF_H);
+  const GROUND_ROW = new Uint32Array(H - HALF_H);
+  {
+    const sr = SKY_TOP & 0xff, sg = (SKY_TOP >> 8) & 0xff, sb = (SKY_TOP >> 16) & 0xff;
+    const fr = FOG_C & 0xff,   fg = (FOG_C >> 8) & 0xff,   fb = (FOG_C >> 16) & 0xff;
+    const gr = GROUND_C & 0xff, gg = (GROUND_C >> 8) & 0xff, gb = (GROUND_C >> 16) & 0xff;
+    for (let y = 0; y < HALF_H; y++) {
+      const t = y / (HALF_H - 1);
+      const r = (sr * (1 - t) + fr * t) | 0;
+      const g = (sg * (1 - t) + fg * t) | 0;
+      const b = (sb * (1 - t) + fb * t) | 0;
+      SKY_ROW[y] = (255 << 24) | (b << 16) | (g << 8) | r;
+    }
+    const groundRows = H - HALF_H;
+    for (let i = 0; i < groundRows; i++) {
+      // Row 0 (y=HALF_H) = FOG_C; row groundRows-1 (y=H-1) = GROUND_C.
+      const t = groundRows > 1 ? i / (groundRows - 1) : 0;
+      const r = (fr * (1 - t) + gr * t) | 0;
+      const g = (fg * (1 - t) + gg * t) | 0;
+      const b = (fb * (1 - t) + gb * t) | 0;
+      GROUND_ROW[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+    }
+  }
+
+  // Precomputed per-pixel vignette multiplier in fixed-point /256. 256 = no
+  // darkening; lower = darker. Bake once at startup; the per-frame pass is a
+  // single multiply per channel per pixel against this table.
+  const VIGNETTE = new Uint16Array(W * H);
+  {
+    const halfW = W * 0.5, halfH = H * 0.5;
+    const denom = VIGNETTE_OUTER - VIGNETTE_INNER;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const dx = (x - halfW) / halfW;
+        const dy = (y - halfH) / halfH;
+        const r = Math.sqrt(dx * dx + dy * dy);
+        let t = (r - VIGNETTE_INNER) / denom;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        const ts = t * t * (3 - 2 * t); // smoothstep
+        const m = 1 + (VIGNETTE_DARKEN - 1) * ts;
+        VIGNETTE[y * W + x] = (m * 256) | 0;
+      }
+    }
+  }
+
+  // Toggle (L) flips between full atmosphere and the legacy flat-shade path.
+  // Default ON; a 2 s debug overlay shows after each toggle.
+  let lightingEnabled = true;
+  let lightingToggledAtMs = -Infinity;
 
   // ---------------------------------------------------------------------------
   // Sprite assets — procedurally baked at startup. No external files.
@@ -1285,7 +1358,24 @@
   }
 
   function render() {
-    fillBackground();
+    if (lightingEnabled) {
+      // Sky-gradient ceiling, then ground-gradient floor. Each row is one
+      // precomputed Uint32 fill — the same cost as the legacy two fills.
+      for (let y = 0; y < HALF_H; y++) {
+        buf32.fill(SKY_ROW[y], y * W, (y + 1) * W);
+      }
+      for (let y = HALF_H; y < H; y++) {
+        buf32.fill(GROUND_ROW[y - HALF_H], y * W, (y + 1) * W);
+      }
+    } else {
+      fillBackground();
+    }
+
+    // Hoist fog channel constants out of the column loop.
+    const fogR = FOG_C & 0xff;
+    const fogG = (FOG_C >> 8) & 0xff;
+    const fogB = (FOG_C >> 16) & 0xff;
+    const fogDenom = FOG_FAR - FOG_NEAR;
 
     for (let x = 0; x < W; x++) {
       const hit = castColumn(x);
@@ -1301,15 +1391,28 @@
       let r, g, b;
       if (hit.wallType === 2) { r =  70; g = 110; b = 200; }
       else                    { r = 200; g =  80; b =  60; }
+      // Side shade always runs first so corners read as corners through fog.
       if (hit.side === 1) {
         r = (r * 0.6) | 0;
         g = (g * 0.6) | 0;
         b = (b * 0.6) | 0;
       }
-      const shade = Math.min(1, 5 / (d + 0.5));
-      r = (r * shade) | 0;
-      g = (g * shade) | 0;
-      b = (b * shade) | 0;
+      if (lightingEnabled) {
+        // Distance fog replaces the old 1/d shade — running both produces a
+        // muddy mid-distance band (see spec #3 / "common pitfalls").
+        let t = (d - FOG_NEAR) / fogDenom;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        const it = (t * 256) | 0;
+        const ib = 256 - it;
+        r = (r * ib + fogR * it) >> 8;
+        g = (g * ib + fogG * it) >> 8;
+        b = (b * ib + fogB * it) >> 8;
+      } else {
+        const shade = Math.min(1, 5 / (d + 0.5));
+        r = (r * shade) | 0;
+        g = (g * shade) | 0;
+        b = (b * shade) | 0;
+      }
       const c = rgba32(r, g, b);
 
       let i = drawStart * W + x;
@@ -1321,9 +1424,24 @@
 
     drawSprites();
 
+    if (lightingEnabled) {
+      // Vignette: per-pixel multiply against the precomputed table. One pass
+      // over W*H ≈ 130k pixels, well under a millisecond on modern hardware.
+      const N = W * H;
+      for (let i = 0; i < N; i++) {
+        const m = VIGNETTE[i];
+        if (m === 256) continue; // no-op band near screen center
+        const c = buf32[i];
+        const r = ((c & 0xff) * m) >> 8;
+        const g = (((c >> 8) & 0xff) * m) >> 8;
+        const b = (((c >> 16) & 0xff) * m) >> 8;
+        buf32[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+      }
+    }
+
     // gun-viewmodel: blit the procedural pistol + (conditional) muzzle flash
-    // into buf32 after walls/sprites and before the single putImageData blit.
-    // The blit is skipped when the player is dead (per spec #14).
+    // into buf32 after the vignette pass so the gun reads as HUD-class and
+    // is not darkened at the screen corners. Skipped when the player is dead.
     drawGunViewmodel();
 
     ctx.putImageData(buf, 0, 0);
@@ -1360,6 +1478,16 @@
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
     ctx.fillText(fps.toFixed(0) + ' fps', 6, 4);
+
+    // atmosphere-lighting: brief debug overlay after each L toggle.
+    if (nowMs - lightingToggledAtMs < 2000) {
+      const a = 1 - (nowMs - lightingToggledAtMs) / 2000;
+      const text = 'lighting: ' + (lightingEnabled ? 'on' : 'off');
+      ctx.fillStyle = `rgba(0,0,0,${(a * 0.55).toFixed(3)})`;
+      ctx.fillRect(2, 20, 96, 16);
+      ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+      ctx.fillText(text, 6, 22);
+    }
 
     drawHUD();
 
@@ -1710,7 +1838,19 @@
       const flash = nowMs < o.e.hitFlashUntil;
       const tint = o.e.mode === 'wind';
 
-      const shade = Math.min(1, 5 / (transformY + 0.5));
+      // atmosphere-lighting: when on, fog blend on transformY mirrors the
+      // wall path; when off, fall back to the legacy 1/d shade so the L
+      // toggle is a true A/B comparison.
+      let shade = 1, fogIt = 0, fogIb = 256;
+      const fogR = FOG_C & 0xff, fogG = (FOG_C >> 8) & 0xff, fogB = (FOG_C >> 16) & 0xff;
+      if (lightingEnabled) {
+        let t = (transformY - FOG_NEAR) / (FOG_FAR - FOG_NEAR);
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        fogIt = (t * 256) | 0;
+        fogIb = 256 - fogIt;
+      } else {
+        shade = Math.min(1, 5 / (transformY + 0.5));
+      }
       const sStep = SPRITE_SIZE / spriteH;
       const tStep = SPRITE_SIZE / spriteW;
 
@@ -1730,13 +1870,26 @@
               if (flash) {
                 buf32[bufIdx] = 0xffffffff; // full white silhouette
               } else {
-                let r = (((c       ) & 0xff) * shade) | 0;
-                let g = (((c >>  8) & 0xff) * shade) | 0;
-                let b = (((c >> 16) & 0xff) * shade) | 0;
+                let r, g, b;
+                if (lightingEnabled) {
+                  r = (c       ) & 0xff;
+                  g = (c >>  8) & 0xff;
+                  b = (c >> 16) & 0xff;
+                } else {
+                  r = (((c       ) & 0xff) * shade) | 0;
+                  g = (((c >>  8) & 0xff) * shade) | 0;
+                  b = (((c >> 16) & 0xff) * shade) | 0;
+                }
                 if (tint) {
                   r = r + 80; if (r > 255) r = 255;
                   g = (g * 0.4) | 0;
                   b = (b * 0.4) | 0;
+                }
+                if (lightingEnabled) {
+                  // Same fog blend formula as the wall path.
+                  r = (r * fogIb + fogR * fogIt) >> 8;
+                  g = (g * fogIb + fogG * fogIt) >> 8;
+                  b = (b * fogIb + fogB * fogIt) >> 8;
                 }
                 buf32[bufIdx] = (255 << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff);
               }
