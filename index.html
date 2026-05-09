@@ -270,8 +270,19 @@
     (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
   const JOY_RADIUS = 40, JOY_DEADZONE = 0.15;
   const FIRE_BTN_R = 28;
-  const BTN_W = 22, BTN_H = 18;
+  const BTN_W = 24, BTN_H = 24;
   const BTN_R = 4; // mobile-touch-polish: rounded-rect corner radius
+  // mobile-mc-feel: util row sits below the minimap (MM_Y + MM_SIZE = 104)
+  // so taps don't overlap the minimap rect. Both utilButtonAt and
+  // drawTouchHUD read these.
+  const UTIL_ROW_Y = 110;
+  const UTIL_XS = [4, 32, 60];
+  // mobile-mc-feel: sticky-slowdown aim assist. Touch only; sweeping the
+  // crosshair near a visible alive enemy multiplies mouseDx by a factor in
+  // [AIM_ASSIST_MIN_SCALE, 1]. No crosshair pull, no snap.
+  const AIM_ASSIST_ANGLE_RAD = 0.18;
+  const AIM_ASSIST_MIN_SCALE = 0.45;
+  const AIM_ASSIST_MAX_DIST = 8;
   const joyVec    = { active: false, fading: false, id: -1, ax: 0, ay: 0, x: 0, y: 0, shownAtMs: 0, hiddenAtMs: 0 };
   const lookTouch = { active: false, id: -1, lastX: 0, lastY: 0 };
   const fireTouch = { active: false, id: -1 };
@@ -286,6 +297,10 @@
   // mobile-touch-polish: per-session look-sensitivity multiplier set once
   // on the first RAF after canvas sizing has stabilised. Stays 1 on desktop.
   let touchLookScale = 1;
+  // mobile-mc-feel: HUD font tier. 'medium' = 14/22, 'narrow' = 16/26.
+  // Set once on the first RAF after canvas sizing stabilises (parallel to
+  // touchLookScale); stays 'medium' on desktop.
+  let touchHudTier = 'medium';
 
   window.addEventListener('keydown', (e) => {
     ensureAudio();
@@ -368,16 +383,16 @@
     return pointInRect(px, py, (W / 2) - 40, (H / 2) + 32, 80, 24);
   }
   // Returns a util-row hit identifier or null. When alive we expose three
-  // 22x18 buttons at y=22 (N/L/M); when dead they swap to a single RESET.
+  // BTN_W x BTN_H buttons at UTIL_ROW_Y (N/L/M); when dead they swap to a
+  // single RESET.
   function utilButtonAt(px, py) {
     if (player.hp <= 0) {
       if (pointInResetBtn(px, py)) return 'reset';
       return null;
     }
-    const y0 = 22;
-    if (pointInRect(px, py, 2,  y0, BTN_W, BTN_H)) return 'N';
-    if (pointInRect(px, py, 26, y0, BTN_W, BTN_H)) return 'L';
-    if (pointInRect(px, py, 50, y0, BTN_W, BTN_H)) return 'M';
+    if (pointInRect(px, py, UTIL_XS[0], UTIL_ROW_Y, BTN_W, BTN_H)) return 'N';
+    if (pointInRect(px, py, UTIL_XS[1], UTIL_ROW_Y, BTN_W, BTN_H)) return 'L';
+    if (pointInRect(px, py, UTIL_XS[2], UTIL_ROW_Y, BTN_W, BTN_H)) return 'M';
     return null;
   }
 
@@ -554,6 +569,34 @@
     }
   }
 
+  // mobile-mc-feel: sticky-slowdown aim assist. Returns a multiplier in
+  // [AIM_ASSIST_MIN_SCALE, 1] applied to mouseDx on touch devices when the
+  // crosshair is angularly close to a visible alive enemy. Returns 1 when
+  // no enemy qualifies (or on desktop) so the rotation accumulator is
+  // untouched. Smallest qualifying scale wins, so overlapping enemies
+  // don't compound the slowdown.
+  function aimAssistScale() {
+    if (!isTouchDevice || player.hp <= 0) return 1;
+    let best = 1;
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (!e.alive) continue;
+      const lx = e.x - player.x;
+      const ly = e.y - player.y;
+      const tProj = lx * player.dirX + ly * player.dirY;
+      if (tProj <= 0 || tProj > AIM_ASSIST_MAX_DIST) continue;
+      const perpSign = lx * player.planeX + ly * player.planeY;
+      const yawOffset = Math.atan2(perpSign, tProj);
+      const absYaw = yawOffset < 0 ? -yawOffset : yawOffset;
+      if (absYaw > AIM_ASSIST_ANGLE_RAD) continue;
+      if (!enemyCanSeePlayer(e)) continue;
+      const t = absYaw / AIM_ASSIST_ANGLE_RAD;
+      const s = AIM_ASSIST_MIN_SCALE + (1 - AIM_ASSIST_MIN_SCALE) * t;
+      if (s < best) best = s;
+    }
+    return best;
+  }
+
   function update(dt) {
     if (player.hp <= 0) {
       // Frozen death state. Drain queued input so it cannot leak post-reset.
@@ -574,6 +617,7 @@
     if (keys['ArrowLeft'])  rot -= rotSpeed * dt;
     if (keys['ArrowRight']) rot += rotSpeed * dt;
     if ((pointerLocked || isTouchDevice) && mouseDx !== 0) {
+      if (isTouchDevice) mouseDx *= aimAssistScale();
       rot += mouseDx * mouseSens;
     }
     mouseDx = 0;
@@ -2121,6 +2165,22 @@
   // space) and visual pixels stay locked together.
   function drawTouchHUD() {
     if (!isTouchDevice) return;
+    // mobile-mc-feel: persistent faint joystick base as a learnability hint.
+    // Drawn at a fixed bottom-left position whenever no joystick is active
+    // and the player is alive; hidden during the death overlay.
+    const JOY_HOME_X = 60;
+    const JOY_HOME_Y = H - 60;
+    if (!joyVec.active && player.hp > 0) {
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+      ctx.beginPath();
+      ctx.arc(JOY_HOME_X, JOY_HOME_Y, JOY_RADIUS, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      ctx.beginPath();
+      ctx.arc(JOY_HOME_X, JOY_HOME_Y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
     // mobile-touch-polish: joystick fades in / out over FADE_MS via an
     // ease-linear alpha envelope. Input is gated on active && !fading in
     // update(), so the fade-out doesn't keep moving the player.
@@ -2177,27 +2237,25 @@
       ctx.fillStyle = '#fff';
       ctx.fillText('RESET', x + 40, y + 12);
     } else {
-      const y0 = 22;
       const labels = ['N', 'L', 'M'];
-      const xs = [2, 26, 50];
       for (let i = 0; i < 3; i++) {
-        const x = xs[i];
+        const x = UTIL_XS[i];
         const label = labels[i];
         const pressed = utilPressed[label] !== 0;
         ctx.fillStyle   = pressed ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.55)';
         ctx.strokeStyle = pressed ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.65)';
-        roundRect(x, y0, BTN_W, BTN_H, BTN_R);
+        roundRect(x, UTIL_ROW_Y, BTN_W, BTN_H, BTN_R);
         ctx.fill();
         ctx.stroke();
         ctx.fillStyle = '#fff';
-        ctx.fillText(label, x + BTN_W / 2, y0 + BTN_H / 2);
+        ctx.fillText(label, x + BTN_W / 2, UTIL_ROW_Y + BTN_H / 2);
         // Mute indicator: 1-px diagonal strikethrough through the M label.
         if (label === 'M' && muted) {
           ctx.strokeStyle = 'rgba(255,80,80,0.9)';
           ctx.lineWidth = 1;
           ctx.beginPath();
-          ctx.moveTo(x + 3,           y0 + 3);
-          ctx.lineTo(x + BTN_W - 3,   y0 + BTN_H - 3);
+          ctx.moveTo(x + 3,                 UTIL_ROW_Y + 3);
+          ctx.lineTo(x + BTN_W - 3, UTIL_ROW_Y + BTN_H - 3);
           ctx.stroke();
         }
       }
@@ -2237,8 +2295,9 @@
   function drawHUD() {
     // mobile-touch-polish: bump strip + font on touch so HP/AMMO/LEVEL/KILLS
     // are readable at thumb-distance. Desktop branch stays byte-identical.
-    const HUD_FONT_PX = isTouchDevice ? 14 : 12;
-    const HUD_STRIP_H = isTouchDevice ? 22 : 18;
+    // mobile-mc-feel: extra bump for narrow viewports (clientWidth <= 380).
+    const HUD_FONT_PX = !isTouchDevice ? 12 : (touchHudTier === 'narrow' ? 16 : 14);
+    const HUD_STRIP_H = !isTouchDevice ? 18 : (touchHudTier === 'narrow' ? 26 : 22);
     const textY = H - HUD_STRIP_H + 4;
     const hpFrac = Math.max(0, Math.min(1, player.hp / MAX_HP));
     // HUD strip background to keep text legible against any wall colour.
@@ -2835,6 +2894,9 @@
     requestAnimationFrame(() => {
       const cw = canvas.clientWidth || W;
       touchLookScale = Math.max(0.6, Math.min(2.0, cw / W));
+      // mobile-mc-feel: pick a HUD font tier from the same one-shot read so
+      // narrow phones (~iPhone SE / 360-px Androids) get readable text.
+      touchHudTier = (cw <= 380) ? 'narrow' : 'medium';
     });
   }
 
