@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Raycaster MVP</title>
 <style>
   html, body {
@@ -12,6 +13,7 @@
     overflow: hidden;
     font-family: monospace;
     color: #ccc;
+    overscroll-behavior: none;
   }
   body {
     display: flex;
@@ -26,6 +28,8 @@
     cursor: crosshair;
     display: block;
     background: #000;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
   }
   .hint {
     position: fixed;
@@ -36,6 +40,9 @@
     pointer-events: none;
     text-shadow: 0 1px 2px #000, 0 0 2px #000;
     user-select: none;
+  }
+  @media (pointer: coarse) {
+    .hint { display: none; }
   }
 </style>
 </head>
@@ -255,6 +262,21 @@
     'Space', 'KeyN'
   ]);
 
+  // mobile-touch-controls: touch input layer. Detection is one-shot at
+  // startup so a desktop user with no touch input never sees the HUD even
+  // if a hover event fires on the canvas.
+  const isTouchDevice =
+    ('ontouchstart' in window) ||
+    (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+  const JOY_RADIUS = 40, JOY_DEADZONE = 0.15;
+  const FIRE_BTN_R = 28;
+  const BTN_W = 22, BTN_H = 18;
+  const joyVec    = { active: false, id: -1, ax: 0, ay: 0, x: 0, y: 0 };
+  const lookTouch = { active: false, id: -1, lastX: 0, lastY: 0 };
+  const fireTouch = { active: false, id: -1 };
+  let firePressed = false;
+  const touches = new Map(); // id -> role: 'joy'|'look'|'fire'|'util'
+
   window.addEventListener('keydown', (e) => {
     ensureAudio();
     const wasDown = !!keys[e.code];
@@ -289,7 +311,7 @@
   });
 
   canvas.addEventListener('click', () => {
-    if (!pointerLocked) {
+    if (!isTouchDevice && !pointerLocked) {
       const p = canvas.requestPointerLock();
       if (p && typeof p.catch === 'function') p.catch(() => {});
     }
@@ -312,6 +334,168 @@
   document.addEventListener('mousemove', (e) => {
     if (pointerLocked) mouseDx += e.movementX || 0;
   });
+
+  // mobile-touch-controls: convert a Touch's clientX/Y (CSS pixels relative
+  // to the viewport) into framebuffer coordinates so hit-testing and
+  // joystick math stay locked to the rendered HUD pixels regardless of
+  // letterboxing or screen size.
+  function touchToFramebuffer(t) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: ((t.clientX - r.left) / r.width)  * W,
+      y: ((t.clientY - r.top)  / r.height) * H,
+    };
+  }
+  function pointInRect(px, py, x, y, w, h) {
+    return px >= x && px < x + w && py >= y && py < y + h;
+  }
+  function pointInFireBtn(px, py) {
+    const dx = px - (W - 36);
+    const dy = py - (H - 36);
+    return (dx * dx + dy * dy) <= FIRE_BTN_R * FIRE_BTN_R;
+  }
+  function pointInResetBtn(px, py) {
+    return pointInRect(px, py, (W / 2) - 40, (H / 2) + 32, 80, 24);
+  }
+  // Returns a util-row hit identifier or null. When alive we expose three
+  // 22x18 buttons at y=22 (N/L/M); when dead they swap to a single RESET.
+  function utilButtonAt(px, py) {
+    if (player.hp <= 0) {
+      if (pointInResetBtn(px, py)) return 'reset';
+      return null;
+    }
+    const y0 = 22;
+    if (pointInRect(px, py, 2,  y0, BTN_W, BTN_H)) return 'N';
+    if (pointInRect(px, py, 26, y0, BTN_W, BTN_H)) return 'L';
+    if (pointInRect(px, py, 50, y0, BTN_W, BTN_H)) return 'M';
+    return null;
+  }
+
+  function onTouchStart(e) {
+    ensureAudio();
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (touches.size >= 3) break; // 4th simultaneous touch ignored
+      const fb = touchToFramebuffer(t);
+      // Util buttons take priority — edge-triggered tap.
+      const util = utilButtonAt(fb.x, fb.y);
+      if (util) {
+        touches.set(t.identifier, 'util');
+        if (util === 'reset') {
+          resetRun();
+        } else if (util === 'N') {
+          regenerateDungeon();
+        } else if (util === 'L') {
+          lightingEnabled = !lightingEnabled;
+          lightingToggledAtMs = nowMs;
+        } else if (util === 'M') {
+          muted = !muted;
+          if (audioCtx && masterGain) {
+            masterGain.gain.value = muted ? 0 : MASTER_VOL;
+          }
+        }
+        continue;
+      }
+      // Fire button.
+      if (pointInFireBtn(fb.x, fb.y)) {
+        if (!fireTouch.active) {
+          fireTouch.active = true;
+          fireTouch.id = t.identifier;
+          firePressed = true;
+          touches.set(t.identifier, 'fire');
+        }
+        continue;
+      }
+      // Left half → joystick.
+      if (fb.x < W / 2) {
+        if (!joyVec.active) {
+          joyVec.active = true;
+          joyVec.id = t.identifier;
+          joyVec.ax = fb.x;
+          joyVec.ay = fb.y;
+          joyVec.x = 0;
+          joyVec.y = 0;
+          touches.set(t.identifier, 'joy');
+        }
+        continue;
+      }
+      // Right half → look.
+      if (!lookTouch.active) {
+        lookTouch.active = true;
+        lookTouch.id = t.identifier;
+        lookTouch.lastX = fb.x;
+        lookTouch.lastY = fb.y;
+        touches.set(t.identifier, 'look');
+      }
+    }
+  }
+
+  function onTouchMove(e) {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      const role = touches.get(t.identifier);
+      if (!role) continue;
+      const fb = touchToFramebuffer(t);
+      if (role === 'joy' && joyVec.active && joyVec.id === t.identifier) {
+        const dx = fb.x - joyVec.ax;
+        const dy = fb.y - joyVec.ay;
+        const len = Math.hypot(dx, dy);
+        const clamped = Math.min(1, len / JOY_RADIUS);
+        if (len > 0) {
+          joyVec.x = (dx / len) * clamped;
+          joyVec.y = (dy / len) * clamped;
+        } else {
+          joyVec.x = 0;
+          joyVec.y = 0;
+        }
+        if (clamped < JOY_DEADZONE) {
+          joyVec.x = 0;
+          joyVec.y = 0;
+        }
+      } else if (role === 'look' && lookTouch.active && lookTouch.id === t.identifier) {
+        // Feed the framebuffer-px delta into the same mouseDx accumulator
+        // the desktop path uses; update() applies mouseSens once and
+        // rotates the camera. At typical phone widths a framebuffer-px is
+        // close to a CSS-px so this reads as native-feeling sensitivity.
+        mouseDx += fb.x - lookTouch.lastX;
+        lookTouch.lastX = fb.x;
+        lookTouch.lastY = fb.y;
+      }
+      // 'fire' and 'util' touches don't track movement.
+    }
+  }
+
+  function onTouchEnd(e) {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      const role = touches.get(t.identifier);
+      if (!role) continue;
+      touches.delete(t.identifier);
+      if (role === 'joy' && joyVec.id === t.identifier) {
+        joyVec.active = false;
+        joyVec.id = -1;
+        joyVec.x = 0;
+        joyVec.y = 0;
+      } else if (role === 'look' && lookTouch.id === t.identifier) {
+        lookTouch.active = false;
+        lookTouch.id = -1;
+      } else if (role === 'fire' && fireTouch.id === t.identifier) {
+        fireTouch.active = false;
+        fireTouch.id = -1;
+        firePressed = false;
+      }
+    }
+  }
+
+  if (isTouchDevice) {
+    canvas.addEventListener('touchstart',  onTouchStart, { passive: false });
+    canvas.addEventListener('touchmove',   onTouchMove,  { passive: false });
+    canvas.addEventListener('touchend',    onTouchEnd,   { passive: false });
+    canvas.addEventListener('touchcancel', onTouchEnd,   { passive: false });
+  }
 
   function isWall(mx, my) {
     if (mx < 0 || my < 0 || mx >= MAP_W || my >= MAP_H) return true;
@@ -363,7 +547,7 @@
     let rot = 0;
     if (keys['ArrowLeft'])  rot -= rotSpeed * dt;
     if (keys['ArrowRight']) rot += rotSpeed * dt;
-    if (pointerLocked && mouseDx !== 0) {
+    if ((pointerLocked || isTouchDevice) && mouseDx !== 0) {
       rot += mouseDx * mouseSens;
     }
     mouseDx = 0;
@@ -383,6 +567,15 @@
     if (keys['KeyS'] || keys['ArrowDown']) { mvX -= player.dirX;   mvY -= player.dirY; }
     if (keys['KeyA']) { mvX -= player.planeX; mvY -= player.planeY; }
     if (keys['KeyD']) { mvX += player.planeX; mvY += player.planeY; }
+    // mobile-touch-controls: joystick output composes into the same move
+    // vector as keyboard. jy < 0 (finger above anchor) = forward; jx > 0
+    // = strafe right. The normalize below caps magnitude so a hybrid
+    // touch-laptop user pressing W and pushing the joystick still moves
+    // at exactly moveSpeed.
+    if (isTouchDevice && joyVec.active) {
+      mvX += player.dirX * (-joyVec.y) + player.planeX * joyVec.x;
+      mvY += player.dirY * (-joyVec.y) + player.planeY * joyVec.x;
+    }
 
     const mvLen = Math.hypot(mvX, mvY);
     if (mvLen > 0) {
@@ -407,6 +600,12 @@
 
     aiTick(dt);
     applyContactDamage(dt);
+
+    // mobile-touch-controls: held-fire driver. fireShot() already enforces
+    // ammo + cooldown + audio, so calling it once per frame self-throttles
+    // to FIRE_COOLDOWN_MS. Placed after applyContactDamage so the death
+    // early-return at the top of update() prevents firing while dead.
+    if (firePressed) fireShot();
 
     // level-exit-progression: stepping onto the exit cell auto-advances to a
     // fresh dungeon. The hp>0 guard is defensive — update() already early-
@@ -1726,6 +1925,11 @@
 
     drawHUD();
 
+    // mobile-touch-controls: touch HUD overlays (joystick / fire / util row
+    // or RESET). Early-returns on desktop. Sits above drawHUD strip but
+    // below the damage arrow / death overlay / level banner.
+    drawTouchHUD();
+
     // hud-feedback-polish: damage arrow draws on top of the HUD strip so it
     // stays visible when the player is huddled in a corner; under death overlay.
     drawDamageArrow();
@@ -1834,6 +2038,65 @@
       ctx.fillText('+1', screenX + 1, screenY + 1);
       ctx.fillStyle = `rgba(255,255,224,${a.toFixed(3)})`;
       ctx.fillText('+1', screenX, screenY);
+    }
+    // Restore defaults the rest of the HUD code expects.
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+  }
+
+  // mobile-touch-controls: render the touch HUD overlay (joystick base /
+  // thumb when active, fire button, util row or RESET when dead). Drawn
+  // in framebuffer coordinates so its hit-test math (in the same pixel
+  // space) and visual pixels stay locked together.
+  function drawTouchHUD() {
+    if (!isTouchDevice) return;
+    // Joystick — only when active.
+    if (joyVec.active) {
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.beginPath();
+      ctx.arc(joyVec.ax, joyVec.ay, JOY_RADIUS, 0, Math.PI * 2);
+      ctx.stroke();
+      const tx = joyVec.ax + joyVec.x * JOY_RADIUS;
+      const ty = joyVec.ay + joyVec.y * JOY_RADIUS;
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath();
+      ctx.arc(tx, ty, 12, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Fire button.
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillStyle = firePressed ? 'rgba(255,80,80,0.25)' : 'rgba(255,255,255,0.10)';
+    ctx.beginPath();
+    ctx.arc(W - 36, H - 36, FIRE_BTN_R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    // Util row / RESET.
+    ctx.font = '12px monospace';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    if (player.hp <= 0) {
+      const x = (W / 2) - 40, y = (H / 2) + 32;
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(x, y, 80, 24);
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.strokeRect(x + 0.5, y + 0.5, 79, 23);
+      ctx.fillStyle = '#fff';
+      ctx.fillText('RESET', x + 40, y + 12);
+    } else {
+      const y0 = 22;
+      const labels = ['N', 'L', 'M'];
+      const xs = [2, 26, 50];
+      for (let i = 0; i < 3; i++) {
+        const x = xs[i];
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(x, y0, BTN_W, BTN_H);
+        ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+        ctx.strokeRect(x + 0.5, y0 + 0.5, BTN_W - 1, BTN_H - 1);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(labels[i], x + BTN_W / 2, y0 + BTN_H / 2);
+      }
     }
     // Restore defaults the rest of the HUD code expects.
     ctx.textAlign = 'left';

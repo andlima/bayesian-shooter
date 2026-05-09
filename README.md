@@ -24,7 +24,7 @@ Two ways, both work today with no install step:
   ```
   Any other static file server works equally well.
 
-After the page loads, click the canvas once to grab pointer lock — the
+On desktop, click the canvas once to grab pointer lock — the
 browser requires a user gesture before mouse-look will activate. Press
 `Esc` at any time to release the pointer.
 
@@ -50,6 +50,13 @@ The keyboard arrow keys exist as a fallback for situations where pointer
 lock isn't available or convenient (e.g. before the first click, or when
 testing in DevTools). Mouse-look is the intended primary input once the
 pointer is locked.
+
+On phones and tablets, drag your left thumb anywhere on the left half of
+the screen for a virtual joystick (forward / strafe), drag your right
+thumb to look, and press the red dot at the bottom-right to fire. Tap the
+small N / L / M buttons in the top-left to regenerate / toggle lighting /
+mute. Pointer lock is not used on touch devices, so there is no initial
+click-to-lock step.
 
 ## Architecture
 
