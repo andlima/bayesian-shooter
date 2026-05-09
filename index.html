@@ -1007,9 +1007,9 @@
 
     ctx.restore();
 
-    // Local tip at (0, -3) (screen-up). Rotate by atan2(dirY, dirX) + pi/2 so
-    // the tip aligns with (dirX, dirY) in screen coords (world-X -> screen-X,
-    // world-Y -> screen-Y on the minimap).
+    // Player triangle, rotated to face along (dirX, dirY). The local "tip"
+    // sits at (0, -3) (screen-up in local space). Under canvas Y-down, rotating
+    // local "up" (0, -1) onto world facing (dirX, dirY) needs +pi/2, not -pi/2.
     const angle = Math.atan2(player.dirY, player.dirX) + Math.PI / 2;
     const cs = Math.cos(angle), sn = Math.sin(angle);
     const tri = [[0, -3], [-2, 2], [2, 2]];
