@@ -88,6 +88,27 @@
   const BOB_SPEED = 8.0;
   const KICK_UP_MS = 60;
   const KICK_RECOVER_MS = 140;
+  // gun-feel-polish: idle sway under the bob (Lissajous, sub-pixel). Different
+  // x/y frequencies so the motion never reads as a simple loop. Quantization
+  // through Math.round in drawGunViewmodel turns the sub-pixel amplitudes into
+  // an alternating ±1 px breath when the bob has eased to rest.
+  const SWAY_FREQ_X = 0.0011;
+  const SWAY_FREQ_Y = 0.0014;
+  const SWAY_AMP_X  = 0.6;
+  const SWAY_AMP_Y  = 0.5;
+  // gun-feel-polish: equip slide-in armed at user-facing transitions
+  // (KeyR / touch RESET / regenerateDungeon / advanceLevel). Frame counter,
+  // not timestamp — keeps the slide deterministic across reloads.
+  const EQUIP_FRAMES   = 15;
+  const EQUIP_DROP_PX  = 24;
+  // gun-feel-polish: brief FOV widening on 'shot' kicks. Decays exponentially
+  // toward 1.0 each frame; ~110 ms half-life at 60 fps with FOV_PUNCH_DECAY=12.
+  const FOV_PUNCH_AMOUNT = 0.022;
+  const FOV_PUNCH_DECAY  = 12;
+  // gun-feel-polish: vertical drop-shadow band under the gun (last buf32 pass
+  // before drawGunViewmodel). Anchors the gun to an implied torso/body.
+  const SHADOW_H        = 28;
+  const SHADOW_MAX_DARK = 0.40;
 
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
@@ -160,6 +181,16 @@
   let kickState = 'idle';
   let kickStart = 0;
   let kickKind = 'shot';
+  // gun-feel-polish: equip slide-in counter. Ticked in drawGunViewmodel (the
+  // only consumer). Starts at 0 (no slide on initial page load — preserves
+  // byte-identical first frame). Set to EQUIP_FRAMES at the four user-facing
+  // transitions (KeyR / touch RESET / regenerateDungeon / advanceLevel).
+  let equipFramesLeft = 0;
+  // gun-feel-polish: multiplier on player.planeX/Y at the four ray-emitting
+  // reader sites. 1.0 = idle, briefly > 1.0 after a 'shot' kick. Decays
+  // exponentially each frame back toward 1.0. Initial 1.0 keeps first-frame
+  // raycasting byte-identical to today.
+  let fovPunch = 1.0;
 
   // ---------------------------------------------------------------------------
   // Audio: lazily-created Web Audio context with a single master gain. Browsers
@@ -312,6 +343,7 @@
       fireShot();
     } else if (e.code === 'KeyR' && player.hp <= 0) {
       resetRun();
+      equipFramesLeft = EQUIP_FRAMES;
     } else if (e.code === 'KeyN') {
       regenerateDungeon();
     } else if (e.code === 'KeyM') {
@@ -415,6 +447,7 @@
         touches.set(t.identifier, 'util:' + label);
         if (util === 'reset') {
           resetRun();
+          equipFramesLeft = EQUIP_FRAMES;
         } else if (util === 'N') {
           regenerateDungeon();
         } else if (util === 'L') {
@@ -607,6 +640,11 @@
       // hp > 0 inside drawGunViewmodel().
       tickKick(performance.now());
       bobIntensity += (0 - bobIntensity) * Math.min(1, 8 * dt);
+      // gun-feel-polish: continue to decay FOV punch through death so the
+      // world settles back to its idle FOV by the time the player presses R;
+      // otherwise the death frame freezes mid-zoom if the killing shot fired
+      // the same frame.
+      fovPunch += (1.0 - fovPunch) * Math.min(1, FOV_PUNCH_DECAY * dt);
       return;
     }
     const moveSpeed = 3.2;     // cells / second
@@ -667,6 +705,10 @@
       bobPhase += (restTarget - bobPhase) * Math.min(1, 8 * dt);
     }
     tickKick(performance.now());
+    // gun-feel-polish: decay FOV punch toward 1.0 each frame. Exponential
+    // decay with FOV_PUNCH_DECAY=12 reaches ~74% recovered in 110 ms — in
+    // sync with the gun's own ~140 ms kick recovery.
+    fovPunch += (1.0 - fovPunch) * Math.min(1, FOV_PUNCH_DECAY * dt);
 
     aiTick(dt);
     applyContactDamage(dt);
@@ -690,8 +732,8 @@
   // Cast a single column with DDA. Returns hit info; does NOT draw.
   function castColumn(x) {
     const cameraX = (2 * x) / W - 1;
-    const rayDirX = player.dirX + player.planeX * cameraX;
-    const rayDirY = player.dirY + player.planeY * cameraX;
+    const rayDirX = player.dirX + player.planeX * fovPunch * cameraX;
+    const rayDirY = player.dirY + player.planeY * fovPunch * cameraX;
 
     let mapX = Math.floor(player.x);
     let mapY = Math.floor(player.y);
@@ -1158,6 +1200,11 @@
     kickState = 'idle';
     kickKind = 'shot';
     kickStart = 0;
+    // gun-feel-polish: world FOV settles at neutral on every R-reset /
+    // N-regen / level transition, even if mid-decay. First-frame fovPunch
+    // is initialized to 1.0, so the IIFE init's call resets 1.0 → 1.0
+    // (a no-op that does not affect first-frame determinism).
+    fovPunch = 1.0;
     for (const k in keys) keys[k] = false;
   }
 
@@ -1416,6 +1463,7 @@
     console.info('[seed] ' + seed);
     applyDungeon(generateDungeon(seed));
     resetRun();
+    equipFramesLeft = EQUIP_FRAMES;
   }
 
   // level-exit-progression: triggered when the player steps onto the exit
@@ -1438,6 +1486,7 @@
     sfxLevelExit();
     levelBannerAtMs = nowMs;
     levelBannerUntilMs = nowMs + 1200;
+    equipFramesLeft = EQUIP_FRAMES;
   }
 
   // Initial dungeon: honour ?seed=<u32> when supplied so reloads reproduce a
@@ -1778,10 +1827,10 @@
   function castFloorCeiling() {
     const FLOOR_TEX = TEXTURES.floor;
     const CEIL_TEX  = TEXTURES.ceiling;
-    const rayDirX0 = player.dirX - player.planeX;
-    const rayDirY0 = player.dirY - player.planeY;
-    const rayDirX1 = player.dirX + player.planeX;
-    const rayDirY1 = player.dirY + player.planeY;
+    const rayDirX0 = player.dirX - player.planeX * fovPunch;
+    const rayDirY0 = player.dirY - player.planeY * fovPunch;
+    const rayDirX1 = player.dirX + player.planeX * fovPunch;
+    const rayDirY1 = player.dirY + player.planeY * fovPunch;
     const dRayX = (rayDirX1 - rayDirX0) / W;
     const dRayY = (rayDirY1 - rayDirY0) / W;
     const fogR = FOG_C & 0xff;
@@ -1946,6 +1995,9 @@
     // gun-viewmodel: blit the procedural pistol + (conditional) muzzle flash
     // into buf32 after the vignette pass so the gun reads as HUD-class and
     // is not darkened at the screen corners. Skipped when the player is dead.
+    // gun-feel-polish: shadow first (darkens the wall pixels under the gun),
+    // gun second (opaque pixels overwrite the shadowed wall).
+    drawGunShadow();
     drawGunViewmodel();
 
     ctx.putImageData(buf, 0, 0);
@@ -2117,7 +2169,7 @@
     if (killPops.length === 0) return;
     // Same camera math as drawSprites(); kept inline (4 lines) so this section
     // is self-contained.
-    const invDet = 1 / (player.planeX * player.dirY - player.dirX * player.planeY);
+    const invDet = 1 / (player.planeX * fovPunch * player.dirY - player.dirX * player.planeY * fovPunch);
     const halfW = W >> 1;
     const halfH = H >> 1;
     ctx.font = '10px monospace';
@@ -2130,7 +2182,7 @@
       const camX = p.x - player.x;
       const camY = p.y - player.y;
       const transformX = invDet * (player.dirY * camX - player.dirX * camY);
-      const transformY = invDet * (-player.planeY * camX + player.planeX * camY);
+      const transformY = invDet * (-player.planeY * fovPunch * camX + player.planeX * fovPunch * camY);
       // Behind the player: hide this frame but keep the pop alive.
       if (transformY <= 0) continue;
       const screenX = (halfW * (1 + transformX / transformY)) | 0;
@@ -2473,14 +2525,14 @@
     // Farthest first so nearer sprites overdraw. Stable tiebreak on id.
     spriteOrder.sort((a, b) => (b.d2 - a.d2) || (a.id - b.id));
 
-    const invDet = 1.0 / (player.planeX * player.dirY - player.dirX * player.planeY);
+    const invDet = 1.0 / (player.planeX * fovPunch * player.dirY - player.dirX * player.planeY * fovPunch);
     const halfW = W >> 1;
     const halfH = H >> 1;
 
     for (let s = 0; s < spriteOrder.length; s++) {
       const o = spriteOrder[s];
       const transformX = invDet * (player.dirY * o.dx - player.dirX * o.dy);
-      const transformY = invDet * (-player.planeY * o.dx + player.planeX * o.dy);
+      const transformY = invDet * (-player.planeY * fovPunch * o.dx + player.planeX * fovPunch * o.dy);
       if (transformY <= 0.01) continue; // behind / on camera plane
 
       const screenX = (halfW * (1 + transformX / transformY)) | 0;
@@ -2783,6 +2835,8 @@
     kickState = 'kicking';
     kickKind  = (kind === 'dry') ? 'dry' : 'shot';
     kickStart = performance.now();
+    // gun-feel-polish: only 'shot' fires the FOV punch. Dry-fire stays small.
+    if (kind !== 'dry') fovPunch = 1.0 + FOV_PUNCH_AMOUNT;
   }
 
   function tickKick(now) {
@@ -2832,6 +2886,29 @@
     return { kickX, kickY, flashFrame };
   }
 
+  // gun-feel-polish: vertical gradient darkening the bottom band of buf32.
+  // Drawn BEFORE the gun blit so opaque gun pixels are not darkened. Pure
+  // RGB scale (alpha byte preserved). Suppressed during death so the
+  // death-overlay frame doesn't show a darkened strip without the gun.
+  function drawGunShadow() {
+    if (player.hp <= 0) return;
+    const top = H - SHADOW_H;
+    for (let y = 0; y < SHADOW_H; y++) {
+      const a   = (y / (SHADOW_H - 1)) * SHADOW_MAX_DARK;
+      const inv = 1 - a;
+      const py  = top + y;
+      const rowBase = py * W;
+      for (let x = 0; x < W; x++) {
+        const i = rowBase + x;
+        const c = buf32[i];
+        const r = ((c       ) & 0xff) * inv;
+        const g = ((c >>>  8) & 0xff) * inv;
+        const b = ((c >>> 16) & 0xff) * inv;
+        buf32[i] = (255 << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff);
+      }
+    }
+  }
+
   // World-frame blit: gun first, then optional muzzle flash with saturating-add
   // (per spec #9). Both anchored to gunX/gunY + bob + kick. Skipped entirely
   // when the player is dead (the kick state machine still ticks elsewhere).
@@ -2841,10 +2918,26 @@
     const bobOffX = Math.sin(bobPhase) * 3 * bobIntensity;
     const bobOffY = -Math.abs(Math.sin(bobPhase * 2)) * 2 * bobIntensity;
     const k = getKickOffsets(performance.now());
+    // gun-feel-polish: sub-pixel Lissajous breath driven by nowMs directly.
+    // Quantization through Math.round produces an alternating ±1 px breath
+    // that's overpowered by bob + kick in motion but visibly alive at idle.
+    const swayX = Math.sin(nowMs * SWAY_FREQ_X) * SWAY_AMP_X;
+    const swayY = Math.cos(nowMs * SWAY_FREQ_Y) * SWAY_AMP_Y;
+    // gun-feel-polish: equip slide-in. Quadratic ease-out: most motion in the
+    // first ~1/3 of the slide so the gun "lands" softly at baseY. | 0 keeps
+    // the offset integer-pixel matching the rest of the blit. equipFramesLeft
+    // is suspended through death (the early-return above skips this body).
+    let equipOffY = 0;
+    if (equipFramesLeft > 0) {
+      const tProg = (EQUIP_FRAMES - equipFramesLeft) / EQUIP_FRAMES;
+      const ease  = (1 - tProg) * (1 - tProg);
+      equipOffY = (ease * EQUIP_DROP_PX) | 0;
+      equipFramesLeft--;
+    }
     const baseX = ((W - GUN_W) >> 1) + GUN_RIGHT_SHIFT;
     const baseY = H - GUN_H + 4;
-    const dx = baseX + Math.round(bobOffX + k.kickX);
-    const dy = baseY + Math.round(bobOffY + k.kickY);
+    const dx = baseX + Math.round(bobOffX + k.kickX + swayX);
+    const dy = baseY + Math.round(bobOffY + k.kickY + swayY) + equipOffY;
 
     // Gun blit (alpha-test: 0 ⇒ skip).
     for (let sy = 0; sy < GUN_H; sy++) {
