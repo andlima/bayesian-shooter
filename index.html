@@ -62,9 +62,8 @@
   const HIT_TINT_MS = 120;
   const ENEMY_FLASH_MS = 80;
   // enemy-ai-combat: ranged-attack tuning. Times in ms; ranges in cells.
-  const WINDUP_MS = 600;
-  const ATTACK_COOLDOWN_MS = 1200;
   const ATTACK_RANGE = 5.0;
+  const MAX_AUDIBLE_DIST = 12; // cells; ~2.4× ATTACK_RANGE
   const ENEMY_AI_RADIUS = 0.3;
   const ENEMY_SEPARATION_R = 0.6;
   const ENEMY_FIRE_FLASH_MS = 80;
@@ -185,6 +184,32 @@
   function sfxKill()    { blip({ type: 'sine',     freq: 400, endFreq: 100, dur: 0.18, attack: 0.005, decay: 0.17, peak: 0.6 }); }
   function sfxHurt()    { blip({ type: 'square',   freq: 120, dur: 0.15, attack: 0.005, decay: 0.14,  peak: 0.55 }); }
   function sfxDryFire() { blip({ type: 'triangle', freq: 80,  dur: 0.04, attack: 0.001, decay: 0.035, peak: 0.45 }); }
+
+  // enemy-attack-feel-polish: per-type enemy SFX with linear distance rolloff.
+  // Caller passes `vol = distanceVolume(srcX, srcY)`; vol === 0 ⇒ early return,
+  // so far-away enemies schedule no Web Audio nodes at all.
+  function distanceVolume(srcX, srcY) {
+    const dx = srcX - player.x, dy = srcY - player.y;
+    const d = Math.hypot(dx, dy);
+    if (d >= MAX_AUDIBLE_DIST) return 0;
+    return 1 - d / MAX_AUDIBLE_DIST;
+  }
+  function sfxImpFire(vol) {
+    if (vol <= 0) return;
+    blip({ type: 'square',   freq: 580, dur: 0.05, attack: 0.001, decay: 0.045, peak: 0.55 * vol });
+  }
+  function sfxGruntFire(vol) {
+    if (vol <= 0) return;
+    blip({ type: 'sawtooth', freq: 240, endFreq: 90,  dur: 0.12, attack: 0.003, decay: 0.115, peak: 0.65 * vol });
+  }
+  function sfxImpWindup(vol) {
+    if (vol <= 0) return;
+    blip({ type: 'sine',     freq: 700, endFreq: 900, dur: 0.10, attack: 0.005, decay: 0.090, peak: 0.40 * vol });
+  }
+  function sfxGruntWindup(vol) {
+    if (vol <= 0) return;
+    blip({ type: 'sawtooth', freq: 110, endFreq: 80,  dur: 0.18, attack: 0.005, decay: 0.170, peak: 0.45 * vol });
+  }
 
   const keys = Object.create(null);
   let mouseDx = 0;
@@ -502,8 +527,8 @@
   // ---------------------------------------------------------------------------
   // Per-type stats. meleeRadius is consumed by the contact-damage check.
   const TYPE_TABLE = {
-    imp:   { moveSpeed: 1.8, hp: 3, rangedDamage: 5,  meleeRadius: 0.6 },
-    grunt: { moveSpeed: 1.0, hp: 5, rangedDamage: 10, meleeRadius: 0.6 },
+    imp:   { moveSpeed: 1.8, hp: 3, rangedDamage: 5,  meleeRadius: 0.6, windupMs: 350, cooldownMs: 700 },
+    grunt: { moveSpeed: 1.0, hp: 5, rangedDamage: 10, meleeRadius: 0.6, windupMs: 900, cooldownMs: 1600 },
   };
   function makeEnemy(x, y, type) {
     const t = TYPE_TABLE[type];
@@ -792,7 +817,7 @@
   //   idle  — no LOS or LOS just lost; stand still, face the player.
   //   chase — LOS true and dist > ATTACK_RANGE; walk toward player.
   //   wind  — LOS true and dist <= ATTACK_RANGE; stop, telegraph red, fire on expiry.
-  //   cool  — post-fire (hit or miss); freeze for ATTACK_COOLDOWN_MS, then re-evaluate.
+  //   cool  — post-fire (hit or miss); freeze for TYPE_TABLE[type].cooldownMs, then re-evaluate.
   // ---------------------------------------------------------------------------
 
   // True iff a DDA ray from the enemy reaches player.{x,y} before any wall.
@@ -879,12 +904,27 @@
     }
   }
 
+  // Per-type windup-tell. Plays exactly once on idle/chase → wind transitions;
+  // cancellation paths (wind → idle/chase) must not call this.
+  function enterWind(e, now) {
+    e.mode = 'wind';
+    e.modeUntil = now + TYPE_TABLE[e.type].windupMs;
+    const vol = distanceVolume(e.x, e.y);
+    if (e.type === 'imp') sfxImpWindup(vol);
+    else if (e.type === 'grunt') sfxGruntWindup(vol);
+  }
+
   // Resolve a hitscan shot fired by enemy `e` at the moment its windup expires.
   // Counts enemyShotsFired regardless of outcome; counts enemyShotsHit only on hit.
   // Misses if: enemy dead, LOS lost, dist > ATTACK_RANGE+0.5, or wall blocks the ray.
   function enemyFireShot(e, now) {
     stats.enemyShotsFired++;
     e.fireFlashUntil = now + ENEMY_FIRE_FLASH_MS;
+    // Fire SFX sits above the gates so a windup-completed shot still gets
+    // audible feedback even when the ray ends up blocked or out of range.
+    const fireVol = distanceVolume(e.x, e.y);
+    if (e.type === 'imp') sfxImpFire(fireVol);
+    else if (e.type === 'grunt') sfxGruntFire(fireVol);
 
     if (!e.alive) return;
     const dx = player.x - e.x, dy = player.y - e.y;
@@ -930,7 +970,7 @@
       if (e.mode === 'wind' && now >= e.modeUntil) {
         enemyFireShot(e, now);
         e.mode = 'cool';
-        e.modeUntil = now + ATTACK_COOLDOWN_MS;
+        e.modeUntil = now + TYPE_TABLE[e.type].cooldownMs;
         continue;
       }
 
@@ -938,8 +978,7 @@
 
       if (e.mode === 'idle') {
         if (seen && dist <= ATTACK_RANGE) {
-          e.mode = 'wind';
-          e.modeUntil = now + WINDUP_MS;
+          enterWind(e, now);
         } else if (seen) {
           e.mode = 'chase';
         }
@@ -947,8 +986,7 @@
         if (!seen) {
           e.mode = 'idle';
         } else if (dist <= ATTACK_RANGE) {
-          e.mode = 'wind';
-          e.modeUntil = now + WINDUP_MS;
+          enterWind(e, now);
         } else if (dist > 1e-6) {
           const stepLen = e.moveSpeed * dt;
           moveEnemyAxisX(e, (dx / dist) * stepLen);
