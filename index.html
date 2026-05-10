@@ -41,13 +41,48 @@
     text-shadow: 0 1px 2px #000, 0 0 2px #000;
     user-select: none;
   }
+  #touch-joy {
+    display: none;
+    position: fixed;
+    left: calc(20px + env(safe-area-inset-left, 0px));
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+    width: 110px;
+    height: 110px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.08);
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+    z-index: 10;
+    box-sizing: border-box;
+  }
+  #touch-joy-thumb {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 44px;
+    height: 44px;
+    margin-left: -22px;
+    margin-top: -22px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.45);
+    pointer-events: none;
+    transform: translate(0, 0);
+    transition: none;
+  }
   @media (pointer: coarse) {
     .hint { display: none; }
+    #touch-joy { display: block; }
   }
 </style>
 </head>
 <body>
 <canvas id="c" width="480" height="270"></canvas>
+<div id="touch-joy" aria-hidden="true">
+  <div id="touch-joy-thumb"></div>
+</div>
 <div class="hint">Click to lock mouse &middot; WASD to move &middot; Mouse / arrows to look &middot; N to regenerate &middot; Esc to release</div>
 <script>
 'use strict';
@@ -314,8 +349,8 @@
   const isTouchDevice =
     ('ontouchstart' in window) ||
     (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
-  const JOY_RADIUS = 40, JOY_DEADZONE = 0.15;
-  const FIRE_BTN_R = 28;
+  const JOY_DEADZONE = 0.15;
+  const JOY_RADIUS_CSS = 55;
   const BTN_W = 24, BTN_H = 24;
   const BTN_R = 4; // mobile-touch-polish: rounded-rect corner radius
   // mobile-mc-feel: util row sits below the minimap (MM_Y + MM_SIZE = 104)
@@ -329,11 +364,19 @@
   const AIM_ASSIST_ANGLE_RAD = 0.18;
   const AIM_ASSIST_MIN_SCALE = 0.45;
   const AIM_ASSIST_MAX_DIST = 8;
-  const joyVec    = { active: false, fading: false, id: -1, ax: 0, ay: 0, x: 0, y: 0, shownAtMs: 0, hiddenAtMs: 0 };
-  const lookTouch = { active: false, id: -1, lastX: 0, lastY: 0 };
-  const fireTouch = { active: false, id: -1 };
-  let firePressed = false;
-  const touches = new Map(); // id -> role: 'joy'|'look'|'fire'|'util:<label>'
+  // mobile-touch-overlay: tap-vs-drag thresholds for the canvas tap-or-look
+  // touch. Distance is in framebuffer-px (matches touchToFramebuffer output).
+  const TAP_MAX_MS = 250;
+  const TAP_MAX_DIST_FB = 4;
+  // mobile-touch-overlay: ~3× base touch look sensitivity. Multiplicative on
+  // touchLookScale so per-device auto-tune still applies.
+  const TOUCH_LOOK_MULT = 3;
+  const joyVec = { active: false, x: 0, y: 0 };
+  let joyTouchId = -1;
+  const tapTouch = { id: -1, startMs: 0, startX: 0, startY: 0, lastX: 0, lastY: 0, totalDist: 0 };
+  const joyEl    = document.getElementById('touch-joy');
+  const joyThumb = document.getElementById('touch-joy-thumb');
+  const touches = new Map(); // id -> role: 'tap'|'util:<label>'
   // mobile-touch-polish: per-button press timestamps for visual feedback.
   // 0 = not pressed; nowMs at touchstart, cleared on touchend / touchcancel.
   const utilPressed = { N: 0, L: 0, M: 0, RESET: 0 };
@@ -421,11 +464,6 @@
   function pointInRect(px, py, x, y, w, h) {
     return px >= x && px < x + w && py >= y && py < y + h;
   }
-  function pointInFireBtn(px, py) {
-    const dx = px - (W - 36);
-    const dy = py - (H - 36);
-    return (dx * dx + dy * dy) <= FIRE_BTN_R * FIRE_BTN_R;
-  }
   function pointInResetBtn(px, py) {
     return pointInRect(px, py, (W / 2) - 40, (H / 2) + 32, 80, 24);
   }
@@ -452,7 +490,7 @@
     e.preventDefault();
     for (let i = 0; i < e.changedTouches.length; i++) {
       const t = e.changedTouches[i];
-      if (touches.size >= 3) break; // 4th simultaneous touch ignored
+      if (touches.size >= 2) break; // 3rd simultaneous canvas touch ignored
       const fb = touchToFramebuffer(t);
       // Util buttons take priority — edge-triggered tap.
       const util = utilButtonAt(fb.x, fb.y);
@@ -476,39 +514,18 @@
         }
         continue;
       }
-      // Fire button.
-      if (pointInFireBtn(fb.x, fb.y)) {
-        if (!fireTouch.active) {
-          fireTouch.active = true;
-          fireTouch.id = t.identifier;
-          firePressed = true;
-          touches.set(t.identifier, 'fire');
-        }
-        continue;
-      }
-      // Left half → joystick.
-      if (fb.x < W / 2) {
-        if (!joyVec.active) {
-          joyVec.active = true;
-          joyVec.fading = false;
-          joyVec.id = t.identifier;
-          joyVec.ax = fb.x;
-          joyVec.ay = fb.y;
-          joyVec.x = 0;
-          joyVec.y = 0;
-          joyVec.shownAtMs = nowMs;
-          joyVec.hiddenAtMs = 0;
-          touches.set(t.identifier, 'joy');
-        }
-        continue;
-      }
-      // Right half → look.
-      if (!lookTouch.active) {
-        lookTouch.active = true;
-        lookTouch.id = t.identifier;
-        lookTouch.lastX = fb.x;
-        lookTouch.lastY = fb.y;
-        touches.set(t.identifier, 'look');
+      // Tap-or-look slot — single concurrent canvas touch. Becomes a tap on
+      // lift if it stayed within TAP_MAX_DIST_FB / TAP_MAX_MS, otherwise a
+      // look-drag accumulates into mouseDx and lift fires nothing.
+      if (tapTouch.id === -1) {
+        tapTouch.id = t.identifier;
+        tapTouch.startMs = nowMs;
+        tapTouch.startX = fb.x;
+        tapTouch.startY = fb.y;
+        tapTouch.lastX = fb.x;
+        tapTouch.lastY = fb.y;
+        tapTouch.totalDist = 0;
+        touches.set(t.identifier, 'tap');
       }
     }
   }
@@ -520,33 +537,21 @@
       const role = touches.get(t.identifier);
       if (!role) continue;
       const fb = touchToFramebuffer(t);
-      if (role === 'joy' && joyVec.active && joyVec.id === t.identifier) {
-        const dx = fb.x - joyVec.ax;
-        const dy = fb.y - joyVec.ay;
-        const len = Math.hypot(dx, dy);
-        const clamped = Math.min(1, len / JOY_RADIUS);
-        if (len > 0) {
-          joyVec.x = (dx / len) * clamped;
-          joyVec.y = (dy / len) * clamped;
-        } else {
-          joyVec.x = 0;
-          joyVec.y = 0;
-        }
-        if (clamped < JOY_DEADZONE) {
-          joyVec.x = 0;
-          joyVec.y = 0;
-        }
-      } else if (role === 'look' && lookTouch.active && lookTouch.id === t.identifier) {
+      if (role === 'tap' && tapTouch.id === t.identifier) {
+        const dx = fb.x - tapTouch.lastX;
+        const dy = fb.y - tapTouch.lastY;
+        tapTouch.totalDist += Math.hypot(dx, dy);
         // Feed the framebuffer-px delta into the same mouseDx accumulator
         // the desktop path uses; update() applies mouseSens once and
         // rotates the camera. The touchLookScale multiplier (set once at
         // startup, see RAF defer below) compensates for canvas widths that
-        // are very different from W = 480 fb-px.
-        mouseDx += (fb.x - lookTouch.lastX) * touchLookScale;
-        lookTouch.lastX = fb.x;
-        lookTouch.lastY = fb.y;
+        // are very different from W = 480 fb-px. TOUCH_LOOK_MULT bumps base
+        // sensitivity ~3× for a Minecraft-Bedrock-like sweep.
+        mouseDx += dx * touchLookScale * TOUCH_LOOK_MULT;
+        tapTouch.lastX = fb.x;
+        tapTouch.lastY = fb.y;
       }
-      // 'fire' and 'util' touches don't track movement.
+      // 'util' touches don't track movement.
     }
   }
 
@@ -557,21 +562,12 @@
       const role = touches.get(t.identifier);
       if (!role) continue;
       touches.delete(t.identifier);
-      if (role === 'joy' && joyVec.id === t.identifier) {
-        // mobile-touch-polish: defer clearing active/id/ax/ay until the
-        // fade-out completes in drawTouchHUD(). Defensive zero of x/y so
-        // the input gate (active && !fading) is doubly safe.
-        joyVec.fading = true;
-        joyVec.hiddenAtMs = nowMs;
-        joyVec.x = 0;
-        joyVec.y = 0;
-      } else if (role === 'look' && lookTouch.id === t.identifier) {
-        lookTouch.active = false;
-        lookTouch.id = -1;
-      } else if (role === 'fire' && fireTouch.id === t.identifier) {
-        fireTouch.active = false;
-        fireTouch.id = -1;
-        firePressed = false;
+      if (role === 'tap' && tapTouch.id === t.identifier) {
+        const elapsed = nowMs - tapTouch.startMs;
+        if (tapTouch.totalDist <= TAP_MAX_DIST_FB && elapsed <= TAP_MAX_MS) {
+          fireShot();
+        }
+        tapTouch.id = -1;
       } else if (role.startsWith('util:')) {
         const label = role.slice(5);
         utilPressed[label] = 0;
@@ -584,6 +580,72 @@
     canvas.addEventListener('touchmove',   onTouchMove,  { passive: false });
     canvas.addEventListener('touchend',    onTouchEnd,   { passive: false });
     canvas.addEventListener('touchcancel', onTouchEnd,   { passive: false });
+  }
+
+  // mobile-touch-overlay: DOM joystick handlers. The joystick is a fixed
+  // bottom-left overlay (#touch-joy) layered above the canvas; its base is
+  // hidden on desktop via the (pointer: coarse) media query. Listeners are
+  // element-scoped, so a finger that drags off the base still drives the
+  // joystick (W3C touch implicit pointer capture).
+  function joyAnchorCss() {
+    const r = joyEl.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }
+
+  function onJoyStart(e) {
+    ensureAudio();
+    audioStarted = true;
+    e.preventDefault();
+    if (joyTouchId !== -1) return;
+    const t = e.changedTouches[0];
+    joyTouchId = t.identifier;
+    joyVec.active = true;
+    joyVec.x = 0;
+    joyVec.y = 0;
+    joyThumb.style.transform = 'translate(0px, 0px)';
+  }
+
+  function onJoyMove(e) {
+    e.preventDefault();
+    if (joyTouchId === -1) return;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier !== joyTouchId) continue;
+      const a = joyAnchorCss();
+      const dx = t.clientX - a.x;
+      const dy = t.clientY - a.y;
+      const len = Math.hypot(dx, dy);
+      const clamped = Math.min(1, len / JOY_RADIUS_CSS);
+      const nx = (len > 0) ? (dx / len) * clamped : 0;
+      const ny = (len > 0) ? (dy / len) * clamped : 0;
+      joyVec.x = (clamped < JOY_DEADZONE) ? 0 : nx;
+      joyVec.y = (clamped < JOY_DEADZONE) ? 0 : ny;
+      const tx = nx * JOY_RADIUS_CSS;
+      const ty = ny * JOY_RADIUS_CSS;
+      joyThumb.style.transform = 'translate(' + tx.toFixed(1) + 'px, ' + ty.toFixed(1) + 'px)';
+      break;
+    }
+  }
+
+  function onJoyEnd(e) {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier !== joyTouchId) continue;
+      joyTouchId = -1;
+      joyVec.active = false;
+      joyVec.x = 0;
+      joyVec.y = 0;
+      joyThumb.style.transform = 'translate(0px, 0px)';
+      break;
+    }
+  }
+
+  if (isTouchDevice) {
+    joyEl.addEventListener('touchstart',  onJoyStart, { passive: false });
+    joyEl.addEventListener('touchmove',   onJoyMove,  { passive: false });
+    joyEl.addEventListener('touchend',    onJoyEnd,   { passive: false });
+    joyEl.addEventListener('touchcancel', onJoyEnd,   { passive: false });
   }
 
   function isWall(mx, my) {
@@ -649,6 +711,16 @@
     if (player.hp <= 0) {
       // Frozen death state. Drain queued input so it cannot leak post-reset.
       mouseDx = 0;
+      // mobile-touch-overlay: defensively zero the joystick so a finger that
+      // was on it at death doesn't leak movement on respawn. The DOM element
+      // is hidden below in the alive-gate; touch events for that finger
+      // continue to fire (implicit pointer capture) but are no-ops here.
+      joyVec.active = false;
+      joyVec.x = 0;
+      joyVec.y = 0;
+      if (isTouchDevice && joyEl.style.display !== 'none') {
+        joyEl.style.display = 'none';
+      }
       // gun-viewmodel: keep the kick state machine ticking so any in-flight
       // recovery completes off-screen, and let the bob intensity decay so the
       // gun is at rest when the player respawns. The blit itself is gated on
@@ -661,6 +733,9 @@
       // the same frame.
       fovPunch += (1.0 - fovPunch) * Math.min(1, FOV_PUNCH_DECAY * dt);
       return;
+    }
+    if (isTouchDevice && joyEl.style.display !== 'block') {
+      joyEl.style.display = 'block';
     }
     const moveSpeed = 3.2;     // cells / second
     const rotSpeed  = 2.4;     // radians / second (keyboard)
@@ -695,7 +770,7 @@
     // = strafe right. The normalize below caps magnitude so a hybrid
     // touch-laptop user pressing W and pushing the joystick still moves
     // at exactly moveSpeed.
-    if (isTouchDevice && joyVec.active && !joyVec.fading) {
+    if (isTouchDevice && joyVec.active) {
       mvX += player.dirX * (-joyVec.y) + player.planeX * joyVec.x;
       mvY += player.dirY * (-joyVec.y) + player.planeY * joyVec.x;
     }
@@ -728,12 +803,6 @@
     aiTick(dt);
     tickProjectiles(dt);
     applyContactDamage(dt);
-
-    // mobile-touch-controls: held-fire driver. fireShot() already enforces
-    // ammo + cooldown + audio, so calling it once per frame self-throttles
-    // to FIRE_COOLDOWN_MS. Placed after applyContactDamage so the death
-    // early-return at the top of update() prevents firing while dead.
-    if (firePressed) fireShot();
 
     // level-exit-progression: stepping onto the exit cell auto-advances to a
     // fresh dungeon. The hp>0 guard is defensive — update() already early-
@@ -2824,63 +2893,6 @@
   // space) and visual pixels stay locked together.
   function drawTouchHUD() {
     if (!isTouchDevice) return;
-    // mobile-mc-feel: persistent faint joystick base as a learnability hint.
-    // Drawn at a fixed bottom-left position whenever no joystick is active
-    // and the player is alive; hidden during the death overlay.
-    const JOY_HOME_X = 60;
-    const JOY_HOME_Y = H - 60;
-    if (!joyVec.active && player.hp > 0) {
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = 'rgba(255,255,255,0.10)';
-      ctx.beginPath();
-      ctx.arc(JOY_HOME_X, JOY_HOME_Y, JOY_RADIUS, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(255,255,255,0.10)';
-      ctx.beginPath();
-      ctx.arc(JOY_HOME_X, JOY_HOME_Y, 3, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    // mobile-touch-polish: joystick fades in / out over FADE_MS via an
-    // ease-linear alpha envelope. Input is gated on active && !fading in
-    // update(), so the fade-out doesn't keep moving the player.
-    const FADE_MS = 120;
-    let joyAlpha = 0;
-    if (joyVec.active) {
-      if (joyVec.fading) {
-        joyAlpha = Math.max(0, 1 - (nowMs - joyVec.hiddenAtMs) / FADE_MS);
-        if (joyAlpha === 0) {
-          joyVec.active = false;
-          joyVec.fading = false;
-          joyVec.id = -1;
-          joyVec.x = 0;
-          joyVec.y = 0;
-        }
-      } else {
-        joyAlpha = Math.min(1, (nowMs - joyVec.shownAtMs) / FADE_MS);
-      }
-    }
-    if (joyVec.active && joyAlpha > 0) {
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = 'rgba(255,255,255,' + (0.25 * joyAlpha).toFixed(3) + ')';
-      ctx.beginPath();
-      ctx.arc(joyVec.ax, joyVec.ay, JOY_RADIUS, 0, Math.PI * 2);
-      ctx.stroke();
-      const tx = joyVec.ax + joyVec.x * JOY_RADIUS;
-      const ty = joyVec.ay + joyVec.y * JOY_RADIUS;
-      ctx.fillStyle = 'rgba(255,255,255,' + (0.35 * joyAlpha).toFixed(3) + ')';
-      ctx.beginPath();
-      ctx.arc(tx, ty, 12, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    // Fire button (circle — softer resting fill so the red pressed state
-    // stands out more; press visual is immediate per AC #3).
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.fillStyle = firePressed ? 'rgba(255,80,80,0.25)' : 'rgba(255,255,255,0.06)';
-    ctx.beginPath();
-    ctx.arc(W - 36, H - 36, FIRE_BTN_R, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
     // Util row / RESET — rounded-rect background with press-state palette.
     ctx.font = '12px monospace';
     ctx.textBaseline = 'middle';

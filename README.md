@@ -52,13 +52,13 @@ testing in DevTools). Mouse-look is the intended primary input once the
 pointer is locked.
 
 On phones and tablets, **tap the screen once to start** (this unlocks
-audio), then drag your left thumb anywhere on the left half of the screen
-for a virtual joystick (forward / strafe), drag your right thumb to look,
-and press the red dot at the bottom-right to fire. Tap the small N / L / M
-buttons just below the minimap to regenerate / toggle lighting / mute.
-Look rotation slows automatically when your crosshair is near a visible
-enemy — you don't need pixel-perfect aim. Pointer lock is not used on
-touch devices, so there is no initial click-to-lock step.
+audio). Use the on-screen joystick in the bottom-left corner to move
+(forward / strafe). **Tap anywhere on the screen to fire**, or **drag
+anywhere on the screen to look around** — both gestures use the same
+finger. Tap the small N / L / M buttons just below the minimap to
+regenerate / toggle lighting / mute. Look rotation slows automatically
+when your crosshair is near a visible enemy. Pointer lock is not used on
+touch devices.
 
 ## Architecture
 
