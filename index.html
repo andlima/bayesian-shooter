@@ -98,6 +98,19 @@
   const AMMO_REFUND = 3;
   const ENEMY_RADIUS = 0.4;
   const MAX_HP = 100;
+  // pickups-health-ammo: walk-on consumable spawns. Values are clamped
+  // to MAX_HP / MAX_AMMO; pickup is skipped (left in place) if the
+  // player is already at max.
+  const PICKUP_RADIUS         = 0.5;   // cells; contact distance for grab
+  const PICKUP_HEALTH_SMALL   = 25;    // +HP from small medkit
+  const PICKUP_HEALTH_LARGE   = 60;    // +HP from large medkit
+  const PICKUP_AMMO_SMALL     = 6;     // +ammo from small crate
+  const PICKUP_AMMO_LARGE     = 14;    // +ammo from large crate
+  const PICKUP_LARGE_CHANCE   = 0.2;   // 20% large, 80% small
+  const PICKUP_MAX_PER_ROOM   = 2;     // 0..2 inclusive per non-starting room
+  const MAX_PICKUPS           = 18;    // hard cap per dungeon
+  const PICKUP_POP_MS         = 600;   // worldspace text duration
+  const PICKUP_POP_MAX        = 8;     // FIFO cap
   const CONTACT_RADIUS = 0.6;
   const CONTACT_DPS = 10;
   const MUZZLE_FLASH_MS = 80;
@@ -217,6 +230,8 @@
   // FIFO of active kill pops, capped at KILL_POP_MAX to bound work per frame.
   const killPops = [];         // [{ x, y, atMs, untilMs }, ...]
   const KILL_POP_MAX = 16;
+  // pickups-health-ammo: FIFO of active pickup pops, capped at PICKUP_POP_MAX.
+  const pickupPops = [];       // [{ x, y, text, color, atMs, untilMs }, ...]
   // level-exit-progression: "LEVEL N" banner timing. Both fields are in nowMs.
   let levelBannerAtMs = 0;
   let levelBannerUntilMs = 0;
@@ -301,6 +316,8 @@
   function sfxKill()    { blip({ type: 'sine',     freq: 400, endFreq: 100, dur: 0.18, attack: 0.005, decay: 0.17, peak: 0.6 }); }
   function sfxHurt()    { blip({ type: 'square',   freq: 120, dur: 0.15, attack: 0.005, decay: 0.14,  peak: 0.55 }); }
   function sfxDryFire() { blip({ type: 'triangle', freq: 80,  dur: 0.04, attack: 0.001, decay: 0.035, peak: 0.45 }); }
+  function sfxPickupHealth() { blip({ type: 'sine',     freq: 660, endFreq: 880, dur: 0.18, attack: 0.005, decay: 0.17, peak: 0.5 }); }
+  function sfxPickupAmmo()   { blip({ type: 'square',   freq: 500, endFreq: 700, dur: 0.10, attack: 0.002, decay: 0.09, peak: 0.4 }); }
 
   // enemy-attack-feel-polish: per-type enemy SFX with linear distance rolloff.
   // Caller passes `vol = distanceVolume(srcX, srcY)`; vol === 0 ⇒ early return,
@@ -803,6 +820,7 @@
     aiTick(dt);
     tickProjectiles(dt);
     applyContactDamage(dt);
+    applyPickups();
 
     // level-exit-progression: stepping onto the exit cell auto-advances to a
     // fresh dungeon. The hp>0 guard is defensive — update() already early-
@@ -1665,12 +1683,104 @@
     '................',
   ], gruntProjPalette);
 
+  // pickups-health-ammo: medkit and ammo crate sprites. Pixels biased to the
+  // lower half of the 16×16 frame so the sprite reads as "on the floor"
+  // (drawSprites centers the sprite vertically at halfH = H/2 = eye level).
+  const medkitPalette = {
+    o: rgba32( 60,  60,  60),   // dark outline
+    W: rgba32(240, 240, 240),   // white panel
+    R: rgba32(220,  60,  50),   // red cross
+  };
+  const medkitSmallFrame = buildFrame([
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '....oooooooo....',
+    '....oWWRRWWo....',
+    '....oWWRRWWo....',
+    '....oRRRRRRo....',
+    '....oRRRRRRo....',
+    '....oWWRRWWo....',
+    '....oWWRRWWo....',
+    '....oooooooo....',
+  ], medkitPalette);
+  const medkitLargeFrame = buildFrame([
+    '................',
+    '................',
+    '................',
+    '................',
+    '..oooooooooooo..',
+    '..oWWWWRRWWWWo..',
+    '..oWWWWRRWWWWo..',
+    '..oWWWWRRWWWWo..',
+    '..oWWWWRRWWWWo..',
+    '..oRRRRRRRRRRo..',
+    '..oRRRRRRRRRRo..',
+    '..oWWWWRRWWWWo..',
+    '..oWWWWRRWWWWo..',
+    '..oWWWWRRWWWWo..',
+    '..oWWWWRRWWWWo..',
+    '..oooooooooooo..',
+  ], medkitPalette);
+
+  const ammoPalette = {
+    c: rgba32( 70,  50,  35),   // crate dark
+    C: rgba32(120,  85,  55),   // crate mid
+    y: rgba32(200, 160,  50),   // brass dim
+    Y: rgba32(255, 230, 120),   // brass bright
+  };
+  const ammoSmallFrame = buildFrame([
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '....cccccccc....',
+    '....cCyyyyCc....',
+    '....cCYYYYCc....',
+    '....cCyyyyCc....',
+    '....cCYYYYCc....',
+    '....cCyyyyCc....',
+    '....cCYYYYCc....',
+    '....cccccccc....',
+  ], ammoPalette);
+  const ammoLargeFrame = buildFrame([
+    '................',
+    '................',
+    '................',
+    '................',
+    '..cccccccccccc..',
+    '..cCyyyyyyyyCc..',
+    '..cCYYYYYYYYCc..',
+    '..cCyyyyyyyyCc..',
+    '..cCYYYYYYYYCc..',
+    '..cCyyyyyyyyCc..',
+    '..cCYYYYYYYYCc..',
+    '..cCyyyyyyyyCc..',
+    '..cCYYYYYYYYCc..',
+    '..cCyyyyyyyyCc..',
+    '..cCYYYYYYYYCc..',
+    '..cccccccccccc..',
+  ], ammoPalette);
+
   const SPRITES = {
-    imp:        [impFrame1, impFrame2],
-    grunt:      [gruntFrame1, gruntFrame2],
-    exit:       [exitFrame, exitFrame],
-    imp_proj:   [impProjFrame, impProjFrame],
-    grunt_proj: [gruntProjFrame, gruntProjFrame],
+    imp:          [impFrame1, impFrame2],
+    grunt:        [gruntFrame1, gruntFrame2],
+    exit:         [exitFrame, exitFrame],
+    imp_proj:     [impProjFrame, impProjFrame],
+    grunt_proj:   [gruntProjFrame, gruntProjFrame],
+    health_small: [medkitSmallFrame, medkitSmallFrame],
+    health_large: [medkitLargeFrame, medkitLargeFrame],
+    ammo_small:   [ammoSmallFrame, ammoSmallFrame],
+    ammo_large:   [ammoLargeFrame, ammoLargeFrame],
   };
 
   // ---------------------------------------------------------------------------
@@ -1704,12 +1814,30 @@
       },
     };
   }
+  // pickups-health-ammo: walk-on consumable. Duck-types into drawSprites's
+  // entity contract (type, animPhase, hitFlashUntil, mode). Pickups never
+  // flash and never enter 'wind' mode, so the SPRITES[type] frames are
+  // identical 2-copies and animPhase stays 0.
+  function makePickup(x, y, type) {
+    return {
+      x, y, type,
+      alive: true,
+      animPhase: 0,
+      hitFlashUntil: 0,
+      mode: 'idle',
+      modeUntil: 0,
+    };
+  }
   // Spawn data is rebuilt by applyDungeon() on startup and on each N-regen;
   // resetRun() then rebuilds the live `enemies` array from `enemySpawns`.
   let enemySpawns = [];
   let PLAYER_SPAWN = { x: 1.5, y: 1.5, dirX: 1, dirY: 0, planeX: 0, planeY: 0.66 };
   let EXIT = { cellX: 0, cellY: 0 };
   let enemies = [];
+  // pickups-health-ammo: frozen layout (refreshed by applyDungeon) and live
+  // entities (rebuilt by resetRun + advanceLevel).
+  let pickupSpawns = [];
+  let pickups = [];
   // enemy-projectile-attacks: in-flight straight-line projectiles spawned by
   // enemyFireShot. Compacted in-place each tick; cleared by
   // clearTransientFeedback on R-restart, N-regen, and level transitions.
@@ -1729,6 +1857,7 @@
     nextDmgFlashMs = 0;
     dmgArrow = null;
     killPops.length = 0;
+    pickupPops.length = 0;
     levelBannerAtMs = 0;
     levelBannerUntilMs = 0;
     mouseDx = 0;
@@ -1754,6 +1883,7 @@
 
   function resetRun() {
     enemies = enemySpawns.map(s => makeEnemy(s.x, s.y, s.type));
+    pickups = pickupSpawns.map(s => makePickup(s.x, s.y, s.type));
     player.x = PLAYER_SPAWN.x;
     player.y = PLAYER_SPAWN.y;
     player.dirX = PLAYER_SPAWN.dirX;
@@ -2032,7 +2162,48 @@
         }
       }
 
-      return { map, mapW: W, mapH: H, rooms, playerSpawn, enemySpawns: newSpawns, exitCell, themeMap, seed };
+      // pickups-health-ammo: 0-2 per non-starting room. Avoids cells
+      // already claimed by enemy spawns in the same room. Roll order
+      // (tier before kind) is the seeded-PRNG contract — reordering
+      // changes the meaning of ?seed=<n> URLs.
+      const newPickupSpawns = [];
+      for (let i = 0; i < rooms.length && newPickupSpawns.length < MAX_PICKUPS; i++) {
+        if (i === startIdx) continue;
+        const room = rooms[i];
+        const taken = new Set();
+        for (let n = 0; n < newSpawns.length; n++) {
+          const sp = newSpawns[n];
+          const cx = Math.floor(sp.x), cy = Math.floor(sp.y);
+          if (cx >= room.x && cx < room.x + room.w &&
+              cy >= room.y && cy < room.y + room.h) {
+            taken.add(cy + ',' + cx);
+          }
+        }
+        const cells = [];
+        for (let y = room.y; y < room.y + room.h; y++) {
+          for (let x = room.x; x < room.x + room.w; x++) {
+            if (map[y][x] === 0 && !taken.has(y + ',' + x)) cells.push({ x, y });
+          }
+        }
+        for (let s = cells.length - 1; s > 0; s--) {
+          const j = Math.floor(rand() * (s + 1));
+          const tmp = cells[s]; cells[s] = cells[j]; cells[j] = tmp;
+        }
+        const count = Math.floor(rand() * (PICKUP_MAX_PER_ROOM + 1)); // 0..2
+        const take = Math.min(count, cells.length);
+        for (let k = 0; k < take && newPickupSpawns.length < MAX_PICKUPS; k++) {
+          const cell = cells[k];
+          const tier = rand() < PICKUP_LARGE_CHANCE ? 'large' : 'small';
+          const kind = rand() < 0.5 ? 'health' : 'ammo';
+          newPickupSpawns.push({
+            x: cell.x + 0.5,
+            y: cell.y + 0.5,
+            type: kind + '_' + tier,
+          });
+        }
+      }
+
+      return { map, mapW: W, mapH: H, rooms, playerSpawn, enemySpawns: newSpawns, pickupSpawns: newPickupSpawns, exitCell, themeMap, seed };
     }
     // Should be unreachable with sane parameters; guard against silent failure.
     throw new Error('dungeon generation failed after retries');
@@ -2045,6 +2216,7 @@
     THEME_MAP = d.themeMap;
     PLAYER_SPAWN = d.playerSpawn;
     enemySpawns = d.enemySpawns;
+    pickupSpawns = d.pickupSpawns;
     EXIT = { cellX: d.exitCell.x, cellY: d.exitCell.y };
   }
 
@@ -2066,6 +2238,7 @@
     applyDungeon(generateDungeon(seed));
     level += 1;
     enemies = enemySpawns.map(s => makeEnemy(s.x, s.y, s.type));
+    pickups = pickupSpawns.map(s => makePickup(s.x, s.y, s.type));
     player.x = PLAYER_SPAWN.x;
     player.y = PLAYER_SPAWN.y;
     player.dirX = PLAYER_SPAWN.dirX;
@@ -2478,6 +2651,47 @@
     }
   }
 
+  // pickups-health-ammo: walk-on grant. Single pass per frame; per-pickup
+  // squared-distance test against PICKUP_RADIUS. "Skip if full" leaves the
+  // pickup in place so the player can come back later; partial grants are
+  // accepted and clamped to MAX_HP / MAX_AMMO.
+  function applyPickups() {
+    if (player.hp <= 0) return;
+    const r2 = PICKUP_RADIUS * PICKUP_RADIUS;
+    for (let i = 0; i < pickups.length; i++) {
+      const p = pickups[i];
+      if (!p.alive) continue;
+      const dx = p.x - player.x;
+      const dy = p.y - player.y;
+      if (dx * dx + dy * dy > r2) continue;
+      if (p.type === 'health_small' || p.type === 'health_large') {
+        if (player.hp >= MAX_HP) continue;
+        const amt = (p.type === 'health_large') ? PICKUP_HEALTH_LARGE : PICKUP_HEALTH_SMALL;
+        player.hp = Math.min(MAX_HP, player.hp + amt);
+        spawnPickupPop(p.x, p.y, '+' + amt + ' HP', 'health');
+        sfxPickupHealth();
+        p.alive = false;
+      } else if (p.type === 'ammo_small' || p.type === 'ammo_large') {
+        if (ammo >= MAX_AMMO) continue;
+        const amt = (p.type === 'ammo_large') ? PICKUP_AMMO_LARGE : PICKUP_AMMO_SMALL;
+        ammo = Math.min(MAX_AMMO, ammo + amt);
+        spawnPickupPop(p.x, p.y, '+' + amt + ' AMMO', 'ammo');
+        sfxPickupAmmo();
+        p.alive = false;
+      }
+    }
+  }
+
+  function spawnPickupPop(x, y, text, kind) {
+    if (pickupPops.length >= PICKUP_POP_MAX) return;
+    pickupPops.push({
+      x, y, text,
+      color: kind,
+      atMs: nowMs,
+      untilMs: nowMs + PICKUP_POP_MS,
+    });
+  }
+
   // Per-row floor/ceiling cast (Lode-Vandevenne). Replaces the old flat
   // fillBackground and the sky/ground gradient fills: every floor row's
   // perpendicular distance is recomputed from screen y, then the texture is
@@ -2697,6 +2911,7 @@
     // pops sit between the vignette and the HUD so they never cover readouts.
     drawDamageEdges();
     drawKillPops();
+    drawPickupPops();
 
     drawMinimap();
 
@@ -2870,6 +3085,38 @@
       ctx.fillText('+1', screenX, screenY);
     }
     // Restore defaults the rest of the HUD code expects.
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+  }
+
+  // pickups-health-ammo: worldspace "+N HP" / "+N AMMO" float + fade pop.
+  // Mirrors drawKillPops camera math; per-pop palette comes from p.color.
+  function drawPickupPops() {
+    if (pickupPops.length === 0) return;
+    const invDet = 1 / (player.planeX * fovPunch * player.dirY - player.dirX * player.planeY * fovPunch);
+    const halfW = W >> 1;
+    const halfH = H >> 1;
+    ctx.font = '10px monospace';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    for (let i = pickupPops.length - 1; i >= 0; i--) {
+      const p = pickupPops[i];
+      if (nowMs >= p.untilMs) { pickupPops.splice(i, 1); continue; }
+      const t = (nowMs - p.atMs) / (p.untilMs - p.atMs);
+      const camX = p.x - player.x;
+      const camY = p.y - player.y;
+      const transformX = invDet * (player.dirY * camX - player.dirX * camY);
+      const transformY = invDet * (-player.planeY * fovPunch * camX + player.planeX * fovPunch * camY);
+      if (transformY <= 0) continue;
+      const screenX = (halfW * (1 + transformX / transformY)) | 0;
+      const screenY = (halfH - 16 * t) | 0;
+      const a = 1 - t;
+      const tint = (p.color === 'health') ? '180,255,200' : '255,230,140';
+      ctx.fillStyle = `rgba(0,0,0,${(a * 0.7).toFixed(3)})`;
+      ctx.fillText(p.text, screenX + 1, screenY + 1);
+      ctx.fillStyle = `rgba(${tint},${a.toFixed(3)})`;
+      ctx.fillText(p.text, screenX, screenY);
+    }
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
   }
@@ -3085,6 +3332,22 @@
       ctx.fillRect(sx, sy, 2, 2);
     }
 
+    // pickups-health-ammo: 2x2 dots — green for health, yellow for ammo.
+    // Sits inside the clipped player-centered region; player triangle draws
+    // after ctx.restore() so it always layers on top.
+    for (let i = 0; i < pickups.length; i++) {
+      const p = pickups[i];
+      if (!p.alive) continue;
+      const sx = (p.x - originX) * cellPx + MM_X - 1;
+      const sy = (p.y - originY) * cellPx + MM_Y - 1;
+      if (sx < MM_X - 2 || sx > MM_X + MM_SIZE) continue;
+      if (sy < MM_Y - 2 || sy > MM_Y + MM_SIZE) continue;
+      ctx.fillStyle = (p.type === 'health_small' || p.type === 'health_large')
+        ? '#3c8'
+        : '#fc3';
+      ctx.fillRect(sx, sy, 2, 2);
+    }
+
     ctx.restore();
 
     // Player triangle, rotated to face along (dirX, dirY). The local "tip"
@@ -3144,6 +3407,16 @@
       const dx = p.x - px;
       const dy = p.y - py;
       spriteOrder.push({ e: p, dx, dy, d2: dx * dx + dy * dy, id: 1000 + i });
+    }
+    // pickups-health-ammo: id offset 2000 keeps the stable-sort tiebreak
+    // deterministic across the four entity categories (enemies 0..N,
+    // projectiles 1000..1000+M, pickups 2000..2000+P, exit -1).
+    for (let i = 0; i < pickups.length; i++) {
+      const p = pickups[i];
+      if (!p.alive) continue;
+      const dx = p.x - px;
+      const dy = p.y - py;
+      spriteOrder.push({ e: p, dx, dy, d2: dx * dx + dy * dy, id: 2000 + i });
     }
     // Push the exit pillar as a synthetic entry. id: -1 keeps the sort
     // stable in the (rare) tie case where a sprite sits at the same d2.
