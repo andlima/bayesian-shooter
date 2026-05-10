@@ -60,6 +60,10 @@ regenerate / toggle lighting / mute. Look rotation slows automatically
 when your crosshair is near a visible enemy. Pointer lock is not used on
 touch devices.
 
+Health medkits (red cross) and ammo crates (brass shells) spawn scattered
+through the dungeon. Walk over one to pick it up; pickups left at full HP
+/ ammo stay in place for later.
+
 ## Architecture
 
 - The whole game lives in a single `index.html` — HTML shell, inline CSS,
