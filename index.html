@@ -131,12 +131,12 @@
   const PROJECTILE_TTL_MS = 2000;      // defensive despawn cap
   // gun-viewmodel: procedural pistol sprite + kick state machine.
   // Times in ms; bob speed in radians/sec scaled by movement intensity.
-  // Back-view layout (gun-viewmodel-fps-perspective): slide foreshortened
-  // toward top of sprite, grip vertical at bottom, lower-right anchor.
+  // Doom-style layout: flat, mirror-symmetric about the sprite seam, drawn
+  // dead-center on screen.
   const GUN_W = 72;
   const GUN_H = 96;
-  const GUN_RIGHT_SHIFT = 32;
-  const BARREL_X = 32;
+  const GUN_RIGHT_SHIFT = 0;
+  const BARREL_X = 36;
   const BARREL_Y = 7;
   const FLASH_W = 24;
   const FLASH_H = 24;
@@ -3857,87 +3857,55 @@
     };
     const spr = new Uint32Array(GUN_W * GUN_H);
 
-    // Per-row x-offset (cant). Pivot at the frame/grip joint so the grip
-    // — which is rendered without cant — meets the canted frame seamlessly.
-    // Rate ≈ 1/6 → ~9° tilt, in spec range. Integer-only via `| 0`.
-    const CANT_PIVOT_Y = 50;
-    function cantOf(y) { return ((y - CANT_PIVOT_Y) / 6) | 0; }
-    function fillCant(x, y, w, h, color) {
-      for (let yy = y; yy < y + h; yy++) {
-        if (yy < 0 || yy >= GUN_H) continue;
-        const c = cantOf(yy);
-        for (let xx = x; xx < x + w; xx++) {
-          const px = xx + c;
-          if (px < 0 || px >= GUN_W) continue;
-          spr[yy * GUN_W + px] = color;
-        }
-      }
-    }
-    function setCant(x, y, color) {
-      if (y < 0 || y >= GUN_H) return;
-      const px = x + cantOf(y);
-      if (px < 0 || px >= GUN_W) return;
-      spr[y * GUN_W + px] = color;
-    }
-    function outlineCant(x, y, w, h, color) {
-      fillCant(x, y, w, 1, color);
-      fillCant(x, y + h - 1, w, 1, color);
-      for (let yy = y + 1; yy < y + h - 1; yy++) {
-        setCant(x, yy, color);
-        setCant(x + w - 1, yy, color);
-      }
-    }
+    // 1. Slide — flat, mirror-symmetric across the sprite seam (between
+    //    columns 35 and 36). Body fill, top highlight strip, dark vertical
+    //    side walls, centered spine highlight, then outline.
+    gunFillRect(spr, 22, 6, 28, 24, PALETTE.bodyMid);
+    gunFillRect(spr, 24, 7, 24,  2, PALETTE.bodyHi);
+    gunFillRect(spr, 22, 8,  2, 20, PALETTE.bodyDark);
+    gunFillRect(spr, 48, 8,  2, 20, PALETTE.bodyDark);
+    gunFillRect(spr, 34, 9,  4, 12, PALETTE.bodyHi);
+    gunOutlineRect(spr, 22, 6, 28, 24, PALETTE.outline);
 
-    // 1. Slide (foreshortened, canted). Body fill, top highlight strip,
-    //    dark vertical strips along the slide's left/right "walls" as seen
-    //    from above-rear, then an outline pass.
-    fillCant(22, 6, 28, 24, PALETTE.bodyMid);
-    fillCant(24, 7, 24, 2, PALETTE.bodyHi);
-    fillCant(22, 8, 2, 20, PALETTE.bodyDark);
-    fillCant(48, 8, 2, 20, PALETTE.bodyDark);
-    // Center spine highlight along the top of the slide.
-    fillCant(34, 9, 4, 12, PALETTE.bodyHi);
-    outlineCant(22, 6, 28, 24, PALETTE.outline);
+    // 2. Muzzle hole — centered on the seam, anchors the muzzle flash at
+    //    (BARREL_X, BARREL_Y).
+    gunFillRect(spr, 34, 6, 4, 4, PALETTE.outline);
 
-    // 2. Muzzle hole — dark spot at the far end (top) of the slide.
-    //    Center lands at sprite (BARREL_X, BARREL_Y) after the cant; the
-    //    flash blit anchors there.
-    fillCant(37, 6, 5, 4, PALETTE.outline);
+    // 3. Front sight — bright nub above the slide, centered on the seam.
+    gunFillRect(spr,    34, 2, 4, 4, PALETTE.sight);
+    gunOutlineRect(spr, 34, 2, 4, 4, PALETTE.outline);
 
-    // 3. Front sight — bright nub above the slide top.
-    fillCant(37, 2, 5, 4, PALETTE.sight);
-    outlineCant(37, 2, 5, 4, PALETTE.outline);
+    // 4. Rear sights — mirror pair at the back of the slide with a bright
+    //    cap on top of each block.
+    gunFillRect(spr,    25, 24, 4, 5, PALETTE.bodyDark);
+    gunFillRect(spr,    25, 24, 4, 1, PALETTE.sight);
+    gunOutlineRect(spr, 25, 24, 4, 5, PALETTE.outline);
+    gunFillRect(spr,    43, 24, 4, 5, PALETTE.bodyDark);
+    gunFillRect(spr,    43, 24, 4, 1, PALETTE.sight);
+    gunOutlineRect(spr, 43, 24, 4, 5, PALETTE.outline);
 
-    // 4. Rear sight — two notched blocks at the near end (bottom) of the
-    //    slide. Bright sight cap on top of each.
-    fillCant(25, 24, 4, 5, PALETTE.bodyDark);
-    fillCant(25, 24, 4, 1, PALETTE.sight);
-    outlineCant(25, 24, 4, 5, PALETTE.outline);
-    fillCant(43, 24, 4, 5, PALETTE.bodyDark);
-    fillCant(43, 24, 4, 1, PALETTE.sight);
-    outlineCant(43, 24, 4, 5, PALETTE.outline);
+    // 5. Frame (lower receiver) — wider than the slide, centered. The
+    //    trigger guard interior is filled with PALETTE.outline so the
+    //    world never shows through; the trigger sliver sits centered on
+    //    the seam in PALETTE.bodyMid.
+    gunFillRect(spr,    18, 30, 36, 20, PALETTE.bodyDark);
+    gunFillRect(spr,    20, 31, 32,  2, PALETTE.bodyMid);
+    gunOutlineRect(spr, 18, 30, 36, 20, PALETTE.outline);
+    gunFillRect(spr,    26, 35, 20, 12, PALETTE.outline);
+    gunFillRect(spr,    35, 37,  2,  8, PALETTE.bodyMid);
 
-    // 5. Frame (lower receiver) — wider than the slide, sits below it,
-    //    canted with the same per-row offset. Trigger guard is a hollow
-    //    cut-out; trigger is a vertical sliver inside.
-    fillCant(18, 30, 36, 20, PALETTE.bodyDark);
-    fillCant(20, 31, 32, 2, PALETTE.bodyMid);
-    outlineCant(18, 30, 36, 20, PALETTE.outline);
-    fillCant(26, 35, 20, 12, 0);
-    outlineCant(26, 35, 20, 12, PALETTE.outline);
-    fillCant(34, 37, 2, 8, PALETTE.bodyMid);
-
-    // 6. Grip — vertical (NOT canted; the hand wouldn't tilt with the
-    //    slide). Brown, with a subtle highlight strip and stippled
-    //    checkering. Bottom edge runs to GUN_H - 1 so the existing
-    //    baseY = H - GUN_H + 4 trim hides the last 4 rows (hand off-frame).
+    // 6. Grip — vertical, centered on the seam, with mirrored highlight
+    //    stripes hugging the left/right walls and symmetric checkering.
+    //    Bottom edge runs to GUN_H - 1 so the existing baseY trim hides
+    //    the last 4 rows (hand off-frame).
     const GRIP_X = 25, GRIP_Y = 50, GRIP_W = 22, GRIP_H = GUN_H - GRIP_Y;
     gunFillRect(spr, GRIP_X, GRIP_Y, GRIP_W, GRIP_H, PALETTE.grip);
-    gunFillRect(spr, GRIP_X + 1, GRIP_Y + 1, 2, GRIP_H - 2, PALETTE.gripHi);
+    gunFillRect(spr, GRIP_X + 1,          GRIP_Y + 1, 2, GRIP_H - 2, PALETTE.gripHi);
+    gunFillRect(spr, GRIP_X + GRIP_W - 3, GRIP_Y + 1, 2, GRIP_H - 2, PALETTE.gripHi);
     for (let yy = GRIP_Y + 2; yy < GRIP_Y + GRIP_H - 1; yy += 3) {
       if (yy >= GUN_H) continue;
       const base = yy * GUN_W;
-      for (let dotX = GRIP_X + 4; dotX < GRIP_X + GRIP_W - 2; dotX += 3) {
+      for (let dotX = GRIP_X + 3; dotX <= GRIP_X + GRIP_W - 3; dotX += 3) {
         spr[base + dotX] = PALETTE.gripDark;
       }
     }
