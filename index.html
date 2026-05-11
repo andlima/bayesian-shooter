@@ -1749,9 +1749,11 @@
   // lower half of the 16×16 frame so the sprite reads as "on the floor"
   // (drawSprites centers the sprite vertically at halfH = H/2 = eye level).
   const medkitPalette = {
-    o: rgba32( 60,  60,  60),   // dark outline
-    W: rgba32(240, 240, 240),   // white panel
-    R: rgba32(220,  60,  50),   // red cross
+    o: rgba32( 40,  40,  40),   // dark outline
+    H: rgba32(255, 255, 255),   // lit top face
+    W: rgba32(225, 225, 225),   // front-face panel (slightly muted)
+    R: rgba32(220,  60,  50),   // red cross (front face only)
+    s: rgba32( 35,  28,  35),   // floor shadow (dark gray-purple)
   };
   const medkitSmallFrame = buildFrame([
     '................',
@@ -1762,39 +1764,41 @@
     '................',
     '................',
     '................',
+    '................',
     '....oooooooo....',
-    '....oWWRRWWo....',
+    '....oHHHHHHo....',
     '....oWWRRWWo....',
     '....oRRRRRRo....',
-    '....oRRRRRRo....',
-    '....oWWRRWWo....',
     '....oWWRRWWo....',
     '....oooooooo....',
+    '.....ssssss.....',
   ], medkitPalette);
   const medkitLargeFrame = buildFrame([
     '................',
     '................',
     '................',
     '................',
-    '..oooooooooooo..',
-    '..oWWWWRRWWWWo..',
-    '..oWWWWRRWWWWo..',
-    '..oWWWWRRWWWWo..',
-    '..oWWWWRRWWWWo..',
-    '..oRRRRRRRRRRo..',
-    '..oRRRRRRRRRRo..',
-    '..oWWWWRRWWWWo..',
-    '..oWWWWRRWWWWo..',
-    '..oWWWWRRWWWWo..',
-    '..oWWWWRRWWWWo..',
-    '..oooooooooooo..',
+    '................',
+    '................',
+    '................',
+    '...oooooooooo...',
+    '...oHHHHHHHHo...',
+    '...oHHHHHHHHo...',
+    '...oWWRRRRWWo...',
+    '...oRRRRRRRRo...',
+    '...oRRRRRRRRo...',
+    '...oWWRRRRWWo...',
+    '...oooooooooo...',
+    '....ssssssss....',
   ], medkitPalette);
 
   const ammoPalette = {
-    c: rgba32( 70,  50,  35),   // crate dark
-    C: rgba32(120,  85,  55),   // crate mid
-    y: rgba32(200, 160,  50),   // brass dim
-    Y: rgba32(255, 230, 120),   // brass bright
+    o: rgba32( 25,  18,  10),   // very dark outline
+    H: rgba32(170, 125,  80),   // lit wood (top face)
+    C: rgba32(115,  80,  50),   // mid wood (front face)
+    Y: rgba32(255, 230, 120),   // brass bright (shell cap left)
+    y: rgba32(180, 135,  50),   // brass dim (shell cap right shading)
+    s: rgba32( 35,  28,  20),   // floor shadow (warm dark)
   };
   const ammoSmallFrame = buildFrame([
     '................',
@@ -1805,32 +1809,32 @@
     '................',
     '................',
     '................',
-    '....cccccccc....',
-    '....cCyyyyCc....',
-    '....cCYYYYCc....',
-    '....cCyyyyCc....',
-    '....cCYYYYCc....',
-    '....cCyyyyCc....',
-    '....cCYYYYCc....',
-    '....cccccccc....',
+    '................',
+    '....oooooooo....',
+    '....oHYyYyHo....',
+    '....oCCCCCCo....',
+    '....oCCCCCCo....',
+    '....oCCCCCCo....',
+    '....oooooooo....',
+    '.....ssssss.....',
   ], ammoPalette);
   const ammoLargeFrame = buildFrame([
     '................',
     '................',
     '................',
     '................',
-    '..cccccccccccc..',
-    '..cCyyyyyyyyCc..',
-    '..cCYYYYYYYYCc..',
-    '..cCyyyyyyyyCc..',
-    '..cCYYYYYYYYCc..',
-    '..cCyyyyyyyyCc..',
-    '..cCYYYYYYYYCc..',
-    '..cCyyyyyyyyCc..',
-    '..cCYYYYYYYYCc..',
-    '..cCyyyyyyyyCc..',
-    '..cCYYYYYYYYCc..',
-    '..cccccccccccc..',
+    '................',
+    '................',
+    '................',
+    '...oooooooooo...',
+    '...oHYyYyYyHo...',
+    '...oHHHHHHHHo...',
+    '...oCCCCCCCCo...',
+    '...oCCCCCCCCo...',
+    '...oCCCCCCCCo...',
+    '...oCCCCCCCCo...',
+    '...oooooooooo...',
+    '....ssssssss....',
   ], ammoPalette);
 
   const SPRITES = {
