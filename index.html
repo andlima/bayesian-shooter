@@ -95,7 +95,6 @@
   const FIRE_COOLDOWN_MS = 250;
   const SHOT_DAMAGE = 2;
   const MAX_AMMO = 24;
-  const AMMO_REFUND = 3;
   const ENEMY_RADIUS = 0.4;
   const MAX_HP = 100;
   // pickups-health-ammo: walk-on consumable spawns. Values are clamped
@@ -2841,7 +2840,6 @@
         bestE.alive = false;
         stats.kills++;
         sfxKill();
-        ammo = Math.min(MAX_AMMO, ammo + AMMO_REFUND);
         // hud-feedback-polish: spawn a "+1" pop at the kill location. Cap at
         // KILL_POP_MAX so a long burst can't grow the array unbounded.
         if (killPops.length < KILL_POP_MAX) {
