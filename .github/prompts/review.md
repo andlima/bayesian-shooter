@@ -52,10 +52,50 @@ Use `blocked` only when a required local inspection step cannot be completed aft
 Do not claim that local command execution is unavailable unless you attempted the needed command(s).
 If you return `blocked` or `failed`, the summary must name the exact command or file access that failed and why.
 
-Output requirements:
-- Return STRICT JSON only, matching the provided output schema.
-- Do not wrap JSON in markdown.
-- Keep findings concise and actionable.
-- Every finding must include concrete file/line evidence from the PR diff.
-- Set reviewed_base_sha exactly to ${BASE_SHA}.
-- Set reviewed_head_sha exactly to ${HEAD_SHA}.
+## Response format — read this last, obey it exactly
+
+Your ENTIRE response is exactly one JSON object matching the provided
+output schema, and nothing else. These delivery rules are mechanical and
+non-negotiable:
+
+- The first character you output is `{` and the last character you
+  output is `}`. Nothing precedes `{` and nothing follows `}`.
+- No preamble, no "Here is the review", no label, no heading, no
+  explanation, no apology, no trailing notes — before or after the
+  object. No leading or trailing whitespace, no blank lines, no
+  byte-order mark. The very first byte of the response is `{`.
+- No markdown and no code fences anywhere in your response. Do NOT begin
+  with ``` or with ```json, and do NOT wrap the object in backticks. The
+  object is emitted raw and unwrapped. (The fenced example below is part
+  of THESE INSTRUCTIONS, not your response — your real response must NOT
+  be fenced.)
+- This holds for every verdict without exception. `approved`,
+  `request_changes`, `blocked`, and `failed` are each still exactly one
+  single valid JSON object. When there are no findings, the response is
+  still one valid JSON object — `findings` present as an empty array and
+  the summary populated. For `blocked` or `failed`, the summary still
+  names the exact command or file access that failed and why. Never, in
+  any code path, replace the JSON object with prose, an apology, or an
+  explanation.
+- Keys and types are governed entirely by the provided output schema —
+  defer to it and do not invent, rename, add, or drop fields. Set
+  reviewed_base_sha exactly to ${BASE_SHA} and reviewed_head_sha exactly
+  to ${HEAD_SHA}. Keep findings concise and actionable, each with
+  concrete file/line evidence from the PR diff.
+
+Shape illustration — framing only, NOT a schema definition. It shows the
+delivery envelope (one raw, unfenced object); the provided output schema
+is authoritative for all keys and types. The fence and placeholders here
+belong to these instructions; your actual response is unfenced and uses
+the real schema:
+
+```json
+{"<verdict key per the provided schema>": "approved",
+ "summary": "<one or two sentences; for blocked/failed, name the exact failing command or file>",
+ "findings": [],
+ "reviewed_base_sha": "${BASE_SHA}",
+ "reviewed_head_sha": "${HEAD_SHA}"}
+```
+
+Recency matters: this is the last instruction before you answer. The
+first character of your response is `{`.
