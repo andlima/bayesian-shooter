@@ -356,7 +356,7 @@
   const blockedKeys = new Set([
     'KeyW', 'KeyA', 'KeyS', 'KeyD',
     'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
-    'Space', 'KeyN'
+    'Space', 'KeyN', 'AltLeft', 'AltRight'
   ]);
 
   // mobile-touch-controls: touch input layer. Detection is one-shot at
@@ -757,9 +757,13 @@
     const rotSpeed  = 2.4;     // radians / second (keyboard)
     const mouseSens = 0.0022;  // radians per pixel of mouse movement
 
+    // Doom-style strafe modifier: hold either Alt to make the arrows
+    // strafe (mirroring A/D) instead of turning the camera.
+    const altStrafe = keys['AltLeft'] || keys['AltRight'];
+
     let rot = 0;
-    if (keys['ArrowLeft'])  rot -= rotSpeed * dt;
-    if (keys['ArrowRight']) rot += rotSpeed * dt;
+    if (keys['ArrowLeft']  && !altStrafe) rot -= rotSpeed * dt;
+    if (keys['ArrowRight'] && !altStrafe) rot += rotSpeed * dt;
     if ((pointerLocked || isTouchDevice) && mouseDx !== 0) {
       if (isTouchDevice) mouseDx *= aimAssistScale();
       rot += mouseDx * mouseSens;
@@ -779,8 +783,8 @@
     let mvX = 0, mvY = 0;
     if (keys['KeyW'] || keys['ArrowUp'])   { mvX += player.dirX;   mvY += player.dirY; }
     if (keys['KeyS'] || keys['ArrowDown']) { mvX -= player.dirX;   mvY -= player.dirY; }
-    if (keys['KeyA']) { mvX -= player.planeX; mvY -= player.planeY; }
-    if (keys['KeyD']) { mvX += player.planeX; mvY += player.planeY; }
+    if (keys['KeyA'] || (altStrafe && keys['ArrowLeft']))  { mvX -= player.planeX; mvY -= player.planeY; }
+    if (keys['KeyD'] || (altStrafe && keys['ArrowRight'])) { mvX += player.planeX; mvY += player.planeY; }
     // mobile-touch-controls: joystick output composes into the same move
     // vector as keyboard. jy < 0 (finger above anchor) = forward; jx > 0
     // = strafe right. The normalize below caps magnitude so a hybrid
