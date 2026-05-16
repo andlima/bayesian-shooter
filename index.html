@@ -431,6 +431,11 @@
       // indicator for ~2 s; otherwise no HUD presence.
       lightingEnabled = !lightingEnabled;
       lightingToggledAtMs = nowMs;
+    } else if (e.code === 'KeyT') {
+      // theme-runtime-selector: cycle natural → crypt → … → sanctum → natural.
+      // Purely cosmetic, so it is NOT gated on player.hp (works while dead).
+      forcedThemeIdx = (forcedThemeIdx + 2) % (THEMES.length + 1) - 1;
+      themeToggledAtMs = nowMs;
     }
   });
   window.addEventListener('keyup', (e) => {
@@ -1440,9 +1445,128 @@
     return tex;
   }
 
+  // abyss base — angular crystal/geode facets. A toroidal Voronoi field
+  // partitions the 64×64 tile into sharp shards; each shard is value-shaded
+  // by its seed id plus a within-shard linear gradient (so it reads as a lit
+  // angular plane, not a flat cell), with a bright accent rim where the
+  // nearest two seeds tie — that rim is the crystal glint at any distance — and
+  // a sparse extra-toned vein just inside it. Toroidal distance everywhere so
+  // the facets tile seamlessly at the 64-px wrap. Own lcg seed.
+  function genCrystalFacet(pal) {
+    const { shadow, base, highlight, accent, extra } = pal;
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0x3fa17c2b);
+    const N = 13;
+    const sx = new Float32Array(N);
+    const sy = new Float32Array(N);
+    const sf = new Float32Array(N);   // per-shard base value 0..1
+    const sgx = new Float32Array(N);  // per-shard gradient direction
+    const sgy = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      sx[i] = rand() * TEX_SIZE;
+      sy[i] = rand() * TEX_SIZE;
+      sf[i] = 0.18 + rand() * 0.70;
+      const ang = rand() * Math.PI * 2;
+      sgx[i] = Math.cos(ang);
+      sgy[i] = Math.sin(ang);
+    }
+    const HALF = TEX_SIZE / 2;
+    for (let y = 0; y < TEX_SIZE; y++) {
+      for (let x = 0; x < TEX_SIZE; x++) {
+        let best = 1e9, second = 1e9, bi = 0;
+        for (let i = 0; i < N; i++) {
+          let dx = x - sx[i];
+          let dy = y - sy[i];
+          if (dx >  HALF) dx -= TEX_SIZE; else if (dx < -HALF) dx += TEX_SIZE;
+          if (dy >  HALF) dy -= TEX_SIZE; else if (dy < -HALF) dy += TEX_SIZE;
+          const d = dx * dx + dy * dy;
+          if (d < best) { second = best; best = d; bi = i; }
+          else if (d < second) { second = d; }
+        }
+        // within-shard linear gradient along the shard's facet direction.
+        let gdx = x - sx[bi];
+        let gdy = y - sy[bi];
+        if (gdx >  HALF) gdx -= TEX_SIZE; else if (gdx < -HALF) gdx += TEX_SIZE;
+        if (gdy >  HALF) gdy -= TEX_SIZE; else if (gdy < -HALF) gdy += TEX_SIZE;
+        const g = (gdx * sgx[bi] + gdy * sgy[bi]) / TEX_SIZE; // ~ -0.5..0.5
+        let f = sf[bi] + g * 0.55;
+        if (f < 0) f = 0; else if (f > 1) f = 1;
+        // shadow→base→highlight ramp, expanded so the rim/vein branches lerp
+        // from anchors rather than re-unpacking a packed pixel.
+        let pr, pg, pb;
+        if (f < 0.5) {
+          const t = f * 2;
+          pr = shadow[0] + (base[0] - shadow[0]) * t;
+          pg = shadow[1] + (base[1] - shadow[1]) * t;
+          pb = shadow[2] + (base[2] - shadow[2]) * t;
+        } else {
+          const t = (f - 0.5) * 2;
+          pr = base[0] + (highlight[0] - base[0]) * t;
+          pg = base[1] + (highlight[1] - base[1]) * t;
+          pb = base[2] + (highlight[2] - base[2]) * t;
+        }
+        const edge = Math.sqrt(second) - Math.sqrt(best);
+        if (edge < 1.1) {
+          // facet edge: bright accent rim — the glint.
+          pr = base[0] + (accent[0] - base[0]) * 0.72;
+          pg = base[1] + (accent[1] - base[1]) * 0.72;
+          pb = base[2] + (accent[2] - base[2]) * 0.72;
+        } else if (edge < 2.4) {
+          // violet vein just inside the rim.
+          pr = pr + (extra[0] - pr) * 0.32;
+          pg = pg + (extra[1] - pg) * 0.32;
+          pb = pb + (extra[2] - pb) * 0.32;
+        }
+        tex[y * TEX_SIZE + x] = rgba32(pr | 0, pg | 0, pb | 0);
+      }
+    }
+    return tex;
+  }
+
+  // bunker base — cold concrete panel with a stenciled diagonal hazard band.
+  // Low-contrast two-octave value-noise concrete (shadow→base→highlight); a
+  // horizontal band whose chevron is driven off a wrap-stable triangle wave
+  // (period 16, a divisor of 64, so the stencil tiles without moiré); a 2-px
+  // extra seam framing the panel so it reads as a bolted plate. Own lcg seed.
+  function genHazardStencil(pal) {
+    const { shadow, base, highlight, accent, extra } = pal;
+    const tex = new Uint32Array(TEX_SIZE * TEX_SIZE);
+    const rand = lcg(0x6b29d40f);
+    const field = new Float32Array(TEX_SIZE * TEX_SIZE);
+    addOctave(field, 16, 1.00, rand);
+    addOctave(field, 32, 0.45, rand);
+    const NORM = 1.45;
+    const BAND_TOP = 24, BAND_BOT = 40;  // hazard band rows
+    const CH_P = 16;                     // chevron period; TEX_SIZE % CH_P === 0
+    const CH_STRIPE = 8;                 // stripe thickness within the band
+    for (let y = 0; y < TEX_SIZE; y++) {
+      const inBand = (y >= BAND_TOP && y < BAND_BOT);
+      for (let x = 0; x < TEX_SIZE; x++) {
+        const i = y * TEX_SIZE + x;
+        if (x < 2 || x >= TEX_SIZE - 2 || y < 2 || y >= TEX_SIZE - 2) {
+          tex[i] = mix(base, extra, 0.85);   // panel seam frame
+          continue;
+        }
+        let n = field[i] / NORM;
+        if (n < 0) n = 0; else if (n > 1) n = 1;
+        if (inBand) {
+          // wrap-stable triangle wave folds the diagonal into a chevron.
+          const tw = Math.abs((x % CH_P) - (CH_P >> 1));
+          const stripe = (((y + tw) / CH_STRIPE) | 0) & 1;
+          tex[i] = (stripe === 0)
+            ? mix(accent, shadow, 0.10 + 0.18 * n)  // caution accent, noise-modulated
+            : mix(shadow, base,  0.15 + 0.20 * n);  // dark concrete gap
+          continue;
+        }
+        tex[i] = mix3(shadow, base, highlight, 0.30 + 0.40 * n);
+      }
+    }
+    return tex;
+  }
+
   // Theme contract: index in this array == themeIdx everywhere else (THEME_MAP
   // cell values, MM_THEME_COLOR slots, the (themeIdx*3+materialIdx+1) wall index).
-  const THEMES = ['crypt', 'foundry', 'cavern'];
+  const THEMES = ['crypt', 'foundry', 'cavern', 'abyss', 'bunker', 'sanctum'];
 
   // Per-theme palette anchors. Order of keys
   // (shadow / base / highlight / accent / extra) is part of the contract — the
@@ -1471,6 +1595,27 @@
       accent:    [82, 116, 70],    // moss green
       extra:     [108, 84, 56],    // packed earth brown
     },
+    { // 3: abyss — deep void, luminous crystal
+      shadow:    [14, 16, 30],     // near-black indigo
+      base:      [40, 46, 78],     // deep blue-violet
+      highlight: [120, 134, 188],  // lit crystal facet
+      accent:    [96, 214, 220],   // luminous cyan — the signature glow
+      extra:     [128, 84, 188],   // violet vein
+    },
+    { // 4: bunker — cold concrete, hazard markings
+      shadow:    [30, 31, 33],     // shadowed concrete / form-line
+      base:      [96, 98, 96],     // mid concrete
+      highlight: [156, 158, 154],  // lit concrete face
+      accent:    [222, 184, 44],   // caution yellow — hazard stencil
+      extra:     [70, 74, 80],     // cold steel trim
+    },
+    { // 5: sanctum — warm sandstone temple, gilt
+      shadow:    [54, 42, 30],     // deep ochre shadow
+      base:      [150, 122, 84],   // sandstone
+      highlight: [208, 184, 138],  // sunlit stone
+      accent:    [196, 150, 60],   // warm gold
+      extra:     [120, 92, 60],    // aged timber / inlay
+    },
   ];
 
   // 15 textures, grouped by theme so the next aesthetic spec (a fourth theme,
@@ -1493,6 +1638,27 @@
     cavern_dirt:     genCavernDirt(THEME_PALETTES[2]),
     cavern_floor:    genCavernFloor(THEME_PALETTES[2]),
     cavern_ceiling:  genCavernCeiling(THEME_PALETTES[2]),
+
+    // abyss (themeIdx 3)
+    abyss_crystal:   genCrystalFacet(THEME_PALETTES[3]),  // NEW gen, base
+    abyss_stone:     genCryptStone(THEME_PALETTES[3]),    // reuse, accent A
+    abyss_moss:      genCavernMoss(THEME_PALETTES[3]),     // reuse, accent B
+    abyss_floor:     genCavernFloor(THEME_PALETTES[3]),    // reuse
+    abyss_ceiling:   genCryptCeiling(THEME_PALETTES[3]),   // reuse
+
+    // bunker (themeIdx 4)
+    bunker_hazard:   genHazardStencil(THEME_PALETTES[4]),  // NEW gen, base
+    bunker_panel:    genFoundryPanel(THEME_PALETTES[4]),   // reuse, accent A
+    bunker_iron:     genFoundryIron(THEME_PALETTES[4]),    // reuse, accent B
+    bunker_floor:    genFoundryFloor(THEME_PALETTES[4]),   // reuse
+    bunker_ceiling:  genFoundryCeiling(THEME_PALETTES[4]), // reuse
+
+    // sanctum (themeIdx 5)
+    sanctum_brick:   genCryptBrick(THEME_PALETTES[5]),     // reuse, base
+    sanctum_rock:    genCavernRock(THEME_PALETTES[5]),     // reuse, accent A
+    sanctum_mossy:   genCryptMossy(THEME_PALETTES[5]),     // reuse, accent B
+    sanctum_floor:   genCryptFloor(THEME_PALETTES[5]),     // reuse
+    sanctum_ceiling: genCryptCeiling(THEME_PALETTES[5]),   // reuse
   };
 
   // MAP cell value -> wall texture. 0 reserved for empty cells; 1..9 are
@@ -1510,16 +1676,31 @@
     TEXTURES.cavern_rock,    // 7: cavern base
     TEXTURES.cavern_moss,    // 8: cavern primary accent
     TEXTURES.cavern_dirt,    // 9: cavern secondary accent
+    TEXTURES.abyss_crystal,  // 10: abyss base
+    TEXTURES.abyss_stone,    // 11: abyss primary accent
+    TEXTURES.abyss_moss,     // 12: abyss secondary accent
+    TEXTURES.bunker_hazard,  // 13: bunker base
+    TEXTURES.bunker_panel,   // 14: bunker primary accent
+    TEXTURES.bunker_iron,    // 15: bunker secondary accent
+    TEXTURES.sanctum_brick,  // 16: sanctum base
+    TEXTURES.sanctum_rock,   // 17: sanctum primary accent
+    TEXTURES.sanctum_mossy,  // 18: sanctum secondary accent
   ];
   const FLOOR_VARIANTS = [
     TEXTURES.crypt_floor,
     TEXTURES.foundry_floor,
     TEXTURES.cavern_floor,
+    TEXTURES.abyss_floor,
+    TEXTURES.bunker_floor,
+    TEXTURES.sanctum_floor,
   ];
   const CEIL_VARIANTS = [
     TEXTURES.crypt_ceiling,
     TEXTURES.foundry_ceiling,
     TEXTURES.cavern_ceiling,
+    TEXTURES.abyss_ceiling,
+    TEXTURES.bunker_ceiling,
+    TEXTURES.sanctum_ceiling,
   ];
 
   // ---------------------------------------------------------------------------
@@ -1560,6 +1741,15 @@
   // Default ON; a 2 s debug overlay shows after each toggle.
   let lightingEnabled = true;
   let lightingToggledAtMs = -Infinity;
+
+  // theme-runtime-selector: render-only theme override. -1 = natural per-room
+  // BFS mix (THEME_MAP, the default); 0..THEMES.length-1 = force the whole
+  // dungeon to that one theme. Consulted only at the three render-time lookup
+  // sites (walls, floor/ceiling cast, minimap); nothing in generation /
+  // collision / AI reads it, and T never mutates MAP/THEME_MAP. Session-only;
+  // resets to -1 on page load, persists across N/R/level-exit by design.
+  let forcedThemeIdx = -1;
+  let themeToggledAtMs = -Infinity;
 
   // ---------------------------------------------------------------------------
   // Sprite assets — procedurally baked at startup. No external files.
@@ -2815,6 +3005,9 @@
     const fogG = (FOG_C >> 8) & 0xff;
     const fogB = (FOG_C >> 16) & 0xff;
     const fogDenom = FOG_FAR - FOG_NEAR;
+    // theme-runtime-selector: frame-constant override, hoisted once per call
+    // (loop-invariant for the whole floor/ceiling pass).
+    const forced = forcedThemeIdx;
 
     for (let y = HALF_H + 1; y < H; y++) {
       const p = y - HALF_H;
@@ -2834,9 +3027,14 @@
         for (let xx = 0; xx < W; xx++) {
           const mx = fx | 0;
           const my = fy | 0;
-          let theme = 0;
-          if (mx >= 0 && mx < MAP_W && my >= 0 && my < MAP_H) {
-            theme = THEME_MAP[my * MAP_W + mx];
+          let theme;
+          if (forced >= 0) {
+            theme = forced;
+          } else {
+            theme = 0;
+            if (mx >= 0 && mx < MAP_W && my >= 0 && my < MAP_H) {
+              theme = THEME_MAP[my * MAP_W + mx];
+            }
           }
           const FLOOR_TEX = FLOOR_VARIANTS[theme];
           const CEIL_TEX  = CEIL_VARIANTS[theme];
@@ -2862,9 +3060,14 @@
         for (let xx = 0; xx < W; xx++) {
           const mx = fx | 0;
           const my = fy | 0;
-          let theme = 0;
-          if (mx >= 0 && mx < MAP_W && my >= 0 && my < MAP_H) {
-            theme = THEME_MAP[my * MAP_W + mx];
+          let theme;
+          if (forced >= 0) {
+            theme = forced;
+          } else {
+            theme = 0;
+            if (mx >= 0 && mx < MAP_W && my >= 0 && my < MAP_H) {
+              theme = THEME_MAP[my * MAP_W + mx];
+            }
           }
           const FLOOR_TEX = FLOOR_VARIANTS[theme];
           const CEIL_TEX  = CEIL_VARIANTS[theme];
@@ -2906,7 +3109,15 @@
       const d = hit.perpWallDist;
       zBuffer[x] = d;
 
-      const tex = WALL_VARIANTS[hit.wallType] || WALL_VARIANTS[1];
+      // theme-runtime-selector: when an override is active, re-encode the cell
+      // under the forced theme while preserving its material variant (one
+      // branch per screen column, outside the per-pixel inner loop).
+      let wt = hit.wallType;
+      if (forcedThemeIdx >= 0 && wt > 0) {
+        const variant = (wt - 1) % 3;          // 0/1/2, the cell's material
+        wt = forcedThemeIdx * 3 + variant + 1; // same material, forced theme
+      }
+      const tex = WALL_VARIANTS[wt] || WALL_VARIANTS[1];
       const rayDirX = hit.rayDirX;
       const rayDirY = hit.rayDirY;
 
@@ -3037,6 +3248,19 @@
       ctx.fillRect(2, 20, 96, 16);
       ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
       ctx.fillText(text, 6, 22);
+    }
+
+    // theme-runtime-selector: brief overlay after each T toggle, one row below
+    // the lighting label so the two coexist without overlapping. Same font/
+    // baseline/colors and alpha ramp; no HUD presence after the 2 s window.
+    if (nowMs - themeToggledAtMs < 2000) {
+      const a = 1 - (nowMs - themeToggledAtMs) / 2000;
+      const text = 'theme: ' +
+        (forcedThemeIdx < 0 ? 'natural' : THEMES[forcedThemeIdx]);
+      ctx.fillStyle = `rgba(0,0,0,${(a * 0.55).toFixed(3)})`;
+      ctx.fillRect(2, 38, 96, 16);
+      ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+      ctx.fillText(text, 6, 40);
     }
 
     drawHUD();
@@ -3373,8 +3597,10 @@
   // Per-theme minimap fill colors. Indexed by THEME_MAP cell value
   // (0=crypt, 1=foundry, 2=cavern). Functional dots — instantly recognizable
   // per theme at minimap scale, not pixel-accurate samples of the wall textures.
-  const MM_THEME_COLOR = ['#5a6878', '#a85c30', '#52744a'];
-  // crypt = slate blue-grey, foundry = rust orange, cavern = mossy green.
+  const MM_THEME_COLOR = ['#5a6878', '#a85c30', '#52744a',
+                          '#5a6aa8', '#c8a83a', '#b58a48'];
+  // crypt = slate blue-grey, foundry = rust orange, cavern = mossy green,
+  // abyss = cold blue, bunker = caution yellow, sanctum = warm gold.
 
   function drawMinimap() {
     const cellPx = MM_CELL_PX;
@@ -3409,7 +3635,8 @@
         if (cell === 0) continue;
         const sx = (mx - originX) * cellPx + MM_X;
         const sy = (my - originY) * cellPx + MM_Y;
-        const t = THEME_MAP[my * MAP_W + mx];
+        const t = (forcedThemeIdx >= 0) ? forcedThemeIdx
+                                        : THEME_MAP[my * MAP_W + mx];
         ctx.fillStyle = MM_THEME_COLOR[t];
         ctx.fillRect(sx, sy, cellPx, cellPx);
       }
