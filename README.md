@@ -36,7 +36,8 @@ browser requires a user gesture before mouse-look will activate. Press
 | `S` / `↓` | Walk backward |
 | `A` | Strafe left |
 | `D` | Strafe right |
-| `←` / `→` | Turn (alt to mouse) |
+| `←` / `→` | Turn camera (or use mouse) |
+| `Alt` + `←` / `→` | Strafe left / right (mirrors `A` / `D`) |
 | Mouse | Look (requires pointer lock) |
 | Left-click | Fire (and lock pointer if not locked) |
 | `Space` | Fire (alt to click) |
