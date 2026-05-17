@@ -95,6 +95,14 @@
   const FIRE_COOLDOWN_MS = 250;
   const SHOT_DAMAGE = 2;
   const MAX_AMMO = 24;
+  // shotgun-weapon-pickup: second weapon. Shared ammo pool; fixed,
+  // deterministic, symmetric pellet fan (no randomness in the spread).
+  // These values are the spec contract — do not "rebalance" them.
+  const SHOTGUN_PELLETS       = 7;
+  const SHOTGUN_SPREAD_RAD    = 0.13;  // total cone is ±SHOTGUN_SPREAD_RAD
+  const SHOTGUN_PELLET_DAMAGE = 1;
+  const SHOTGUN_AMMO_COST     = 3;
+  const SHOTGUN_COOLDOWN_MS   = 650;
   const ENEMY_RADIUS = 0.4;
   const MAX_HP = 100;
   // pickups-health-ammo: walk-on consumable spawns. Values are clamped
@@ -208,6 +216,12 @@
   };
 
   let ammo = MAX_AMMO;
+  // shotgun-weapon-pickup: currently-selected weapon id + shotgun ownership.
+  // Both carried forward by advanceLevel() (no reset there) and reset to
+  // pistol-only by resetRun(). The shotgun cannot be selected while
+  // hasShotgun is false (see setWeapon / cycleWeapon).
+  let weapon = 'pistol';
+  let hasShotgun = false;
   let level = 1;
   let lastFireTime = -Infinity;
   let muzzleFlashUntil = 0;
@@ -317,6 +331,9 @@
   function sfxDryFire() { blip({ type: 'triangle', freq: 80,  dur: 0.04, attack: 0.001, decay: 0.035, peak: 0.45 }); }
   function sfxPickupHealth() { blip({ type: 'sine',     freq: 660, endFreq: 880, dur: 0.18, attack: 0.005, decay: 0.17, peak: 0.5 }); }
   function sfxPickupAmmo()   { blip({ type: 'square',   freq: 500, endFreq: 700, dur: 0.10, attack: 0.002, decay: 0.09, peak: 0.4 }); }
+  // shotgun-weapon-pickup: distinct low "ka-chunk" cue for grabbing the
+  // shotgun. ≤ 200 ms, same blip() style; silenced by mute like every cue.
+  function sfxPickupShotgun(){ blip({ type: 'square',   freq: 300, endFreq: 520, dur: 0.16, attack: 0.004, decay: 0.15, peak: 0.5 }); }
 
   // enemy-attack-feel-polish: per-type enemy SFX with linear distance rolloff.
   // Caller passes `vol = distanceVolume(srcX, srcY)`; vol === 0 ⇒ early return,
@@ -406,6 +423,11 @@
   // Set once on the first RAF after canvas sizing stabilises (parallel to
   // touchLookScale); stays 'medium' on desktop.
   let touchHudTier = 'medium';
+  // shotgun-weapon-pickup: framebuffer-space bounding box of the HUD weapon
+  // name, refreshed every drawHUD(). Read by the touch hit-test so tapping
+  // the label cycles the weapon (same edge-tap precedence as utilButtonAt).
+  // null until the first drawHUD() so a pre-HUD tap is a safe miss.
+  let weaponHudRect = null;
 
   window.addEventListener('keydown', (e) => {
     ensureAudio();
@@ -436,6 +458,16 @@
       // Purely cosmetic, so it is NOT gated on player.hp (works while dead).
       forcedThemeIdx = (forcedThemeIdx + 2) % (THEMES.length + 1) - 1;
       themeToggledAtMs = nowMs;
+    } else if (e.code === 'Digit1') {
+      // shotgun-weapon-pickup: weapon select. Edge-triggered (the wasDown
+      // guard above drops auto-repeat) and inert during the death freeze,
+      // like the other gameplay keys. Digit2 is a no-op until the shotgun is
+      // owned; KeyQ cycles owned weapons (pistol-only ⇒ no-op).
+      if (player.hp > 0) setWeapon('pistol');
+    } else if (e.code === 'Digit2') {
+      if (player.hp > 0) setWeapon('shotgun');
+    } else if (e.code === 'KeyQ') {
+      if (player.hp > 0) cycleWeapon();
     }
   });
   window.addEventListener('keyup', (e) => {
@@ -501,6 +533,17 @@
     if (pointInRect(px, py, UTIL_XS[2], UTIL_ROW_Y, BTN_W, BTN_H)) return 'M';
     return null;
   }
+  // shotgun-weapon-pickup: true if (px,py) is over the HUD weapon-name label
+  // (with a small fat-finger pad). Inert during the death freeze, matching
+  // the keyboard switch. weaponHudRect is refreshed by drawHUD(); null until
+  // the first HUD frame ⇒ a safe miss.
+  function weaponLabelHit(px, py) {
+    if (player.hp <= 0 || !weaponHudRect) return false;
+    const PAD = 6;
+    return pointInRect(px, py,
+      weaponHudRect.x - PAD, weaponHudRect.y - PAD,
+      weaponHudRect.w + PAD * 2, weaponHudRect.h + PAD * 2);
+  }
 
   function onTouchStart(e) {
     ensureAudio();
@@ -533,6 +576,16 @@
             masterGain.gain.value = muted ? 0 : MASTER_VOL;
           }
         }
+        continue;
+      }
+      // shotgun-weapon-pickup: weapon-label tap. Same edge-tap precedence as
+      // the util buttons (checked before the tap-or-look slot and consumed),
+      // so a tap there cycles the weapon and never also fires. With only the
+      // pistol owned cycleWeapon() is a visible no-op; the tap is still
+      // consumed (it must not fall through and fire).
+      if (weaponLabelHit(fb.x, fb.y)) {
+        cycleWeapon();
+        touches.set(t.identifier, 'weapon');
         continue;
       }
       // Tap-or-look slot — single concurrent canvas touch. Becomes a tap on
@@ -2072,6 +2125,55 @@
     '............ssssssss............',  // 31  floor shadow
   ], ammoPalette);
 
+  // shotgun-weapon-pickup: world pickup billboard, built the same way as the
+  // medkit / ammo frames (lower half of the 32×32 frame so it reads as lying
+  // on the floor). A long steel barrel + walnut stock silhouette — instantly
+  // a weapon on the ground, and visually distinct from the boxy medkit / ammo
+  // crates. Carries the same duck-typed entity fields via makePickup.
+  const shotgunPalette = {
+    o: rgba32( 22,  20,  24),   // dark outline
+    M: rgba32( 96, 102, 114),   // steel mid
+    H: rgba32(156, 164, 178),   // steel highlight
+    m: rgba32( 54,  58,  66),   // steel dark (underside / barrel)
+    W: rgba32(120,  74,  40),   // walnut wood
+    w: rgba32( 78,  48,  24),   // walnut dark
+    s: rgba32( 30,  26,  30),   // cool floor shadow
+  };
+  const weaponShotgunFrame = buildFrame([
+    '................................',  //  0
+    '................................',  //  1
+    '................................',  //  2
+    '................................',  //  3
+    '................................',  //  4
+    '................................',  //  5
+    '................................',  //  6
+    '................................',  //  7
+    '................................',  //  8
+    '................................',  //  9
+    '................................',  // 10
+    '................................',  // 11
+    '................................',  // 12
+    '................................',  // 13
+    '................................',  // 14
+    '................................',  // 15
+    '................................',  // 16
+    '................................',  // 17
+    '................................',  // 18
+    '................................',  // 19
+    '................................',  // 20
+    '................................',  // 21
+    '................................',  // 22
+    '................................',  // 23
+    '..........oooooooooooooooooooo..',  // 24  barrel + receiver top outline
+    '.........oMMMMMHHHHHHHHHHHHHHo..',  // 25  receiver / lit barrel
+    '...oWWWWWWMMMMMMMMMMMMMMMMMMMo..',  // 26  stock top / barrel body
+    '..oWWWWWWWmmmmmmmmmmmmmmmmmmmo..',  // 27  barrel underside
+    '..oWWWWWWmmmoooWWWWWWWWmmmmmo...',  // 28  trigger / wooden pump
+    '...owwwwwoWWWo.wwwwwwwwmmmmo....',  // 29  grip / pump base
+    '....oooooooooo.oooooooooooo.....',  // 30  bottom outline
+    '.....sssssssssssssssssssssss....',  // 31  floor shadow
+  ], shotgunPalette);
+
   const SPRITES = {
     imp:          [impFrame1, impFrame2],
     grunt:        [gruntFrame1, gruntFrame2],
@@ -2082,6 +2184,7 @@
     health_large: [medkitLargeFrame, medkitLargeFrame],
     ammo_small:   [ammoSmallFrame, ammoSmallFrame],
     ammo_large:   [ammoLargeFrame, ammoLargeFrame],
+    weapon_shotgun: [weaponShotgunFrame, weaponShotgunFrame],
   };
 
   // ---------------------------------------------------------------------------
@@ -2193,6 +2296,12 @@
     player.planeY = PLAYER_SPAWN.planeY;
     player.hp = MAX_HP;
     ammo = MAX_AMMO;
+    // shotgun-weapon-pickup: a fresh run is always pistol-only; the shotgun
+    // must be found again in the world. Live `pickups` were rebuilt from
+    // pickupSpawns above with no special-casing, so the new dungeon's single
+    // shotgun pickup is back in place.
+    weapon = 'pistol';
+    hasShotgun = false;
     level = 1;
     lastFireTime = -Infinity;
     clearTransientFeedback();
@@ -2499,6 +2608,44 @@
         }
       }
 
+      // shotgun-weapon-pickup: place exactly ONE weapon_shotgun pickup in an
+      // open floor cell of a non-starting room, not on an enemy spawn or an
+      // existing pickup cell. These rand() calls occur strictly AFTER the
+      // pickup loop above and before the return, so no pre-existing roll's
+      // consumed RNG value shifts — the byte-for-byte enemy / health-ammo /
+      // tile layout for any existing ?seed= is preserved (AC #2). Same seed →
+      // same shotgun cell. If no eligible cell exists (degenerate dungeon),
+      // the dungeon ships without a shotgun pickup rather than crash. Appended
+      // to newPickupSpawns so it participates in the normal pickup rebuild
+      // with no special-casing.
+      const sgOccupied = new Set();
+      for (let n = 0; n < newSpawns.length; n++) {
+        sgOccupied.add(Math.floor(newSpawns[n].y) + ',' + Math.floor(newSpawns[n].x));
+      }
+      for (let n = 0; n < newPickupSpawns.length; n++) {
+        sgOccupied.add(Math.floor(newPickupSpawns[n].y) + ',' + Math.floor(newPickupSpawns[n].x));
+      }
+      const sgCells = [];
+      for (let i = 0; i < rooms.length; i++) {
+        if (i === startIdx) continue;
+        const room = rooms[i];
+        for (let y = room.y; y < room.y + room.h; y++) {
+          for (let x = room.x; x < room.x + room.w; x++) {
+            if (map[y][x] === 0 && !sgOccupied.has(y + ',' + x)) {
+              sgCells.push({ x, y });
+            }
+          }
+        }
+      }
+      if (sgCells.length > 0) {
+        const sg = sgCells[Math.floor(rand() * sgCells.length)];
+        newPickupSpawns.push({
+          x: sg.x + 0.5,
+          y: sg.y + 0.5,
+          type: 'weapon_shotgun',
+        });
+      }
+
       return { map, mapW: W, mapH: H, rooms, playerSpawn, enemySpawns: newSpawns, pickupSpawns: newPickupSpawns, exitCell, themeMap, seed };
     }
     // Should be unreachable with sane parameters; guard against silent failure.
@@ -2528,6 +2675,11 @@
   // cell. Carries HP, ammo, and lastFireTime forward; everything else is
   // a fresh dungeon. Always picks a random seed (?seed=<u32> only pins the
   // initial map, not transitions).
+  // shotgun-weapon-pickup: `weapon` and `hasShotgun` are module-scope and
+  // intentionally NOT touched here, so they carry forward across the level
+  // exit exactly like HP / ammo / lastFireTime. The new dungeon's `pickups`
+  // are rebuilt from pickupSpawns below, so it ships its own single shotgun
+  // pickup with no special-casing.
   function advanceLevel() {
     const seed = pickRandomSeed();
     console.info('[seed] ' + seed);
@@ -2853,57 +3005,99 @@
     return perp;
   }
 
+  // shotgun-weapon-pickup: weapon selection. setWeapon re-arms the existing
+  // equip slide-in only on an actual change (a redundant Digit1 while already
+  // on the pistol is a no-op, so it never re-pops). The shotgun cannot be
+  // selected while it is not owned. cycleWeapon is a no-op with pistol only.
+  function setWeapon(id) {
+    if (id === weapon) return;
+    if (id === 'shotgun' && !hasShotgun) return;
+    if (id !== 'pistol' && id !== 'shotgun') return;
+    weapon = id;
+    equipFramesLeft = EQUIP_FRAMES;
+  }
+  function cycleWeapon() {
+    if (!hasShotgun) return; // pistol-only: visible no-op
+    setWeapon(weapon === 'pistol' ? 'shotgun' : 'pistol');
+  }
+
+  // Fires the currently-selected weapon from its WEAPONS entry. The pistol
+  // path is behaviorally identical to the original single-ray hitscan
+  // (pellets = 1, spreadRad = 0 ⇒ a single ray straight along player.dir,
+  // SHOT_DAMAGE, 250 ms cooldown, same flash/kick/SFX/hit-tint/dry-fire).
+  // One trigger pull is exactly ONE Bernoulli trial regardless of weapon:
+  // stats.shotsFired += 1 per non-dry pull; stats.shotsHit += 1 iff at least
+  // one pellet connected (never the pellet count).
   function fireShot() {
     if (player.hp <= 0) return;            // frozen death state — no fire
+    const wpn = WEAPONS[weapon];
     const now = performance.now();
-    if (now - lastFireTime < FIRE_COOLDOWN_MS) return; // cooldown drops input
-    if (ammo <= 0) {
+    if (now - lastFireTime < wpn.cooldownMs) return; // cooldown drops input
+    if (ammo < wpn.ammoCost) {
       // Dry trigger — counters untouched, but a distinct click plays.
       sfxDryFire();
       onPlayerFire('dry');
       return;
     }
     lastFireTime = now;
-    ammo--;
+    ammo = Math.max(0, ammo - wpn.ammoCost); // shared pool; never below 0
     stats.shotsFired++;
     sfxShot();
     muzzleFlashUntil = now + MUZZLE_FLASH_MS;
     onPlayerFire('shot');
 
-    const dWall = castRay(player.x, player.y, player.dirX, player.dirY);
-
-    // Nearest enemy along the ray within enemyRadius perpendicular and < dWall.
-    let bestT = Infinity;
-    let bestE = null;
+    const pellets = wpn.pellets;
+    const spread = wpn.spreadRad;
     const r2 = ENEMY_RADIUS * ENEMY_RADIUS;
-    for (let i = 0; i < enemies.length; i++) {
-      const e = enemies[i];
-      if (!e.alive) continue;
-      const lx = e.x - player.x;
-      const ly = e.y - player.y;
-      const tProj = lx * player.dirX + ly * player.dirY;
-      if (tProj <= 0 || tProj >= dWall) continue;
-      const perp2 = lx * lx + ly * ly - tProj * tProj;
-      if (perp2 > r2) continue;
-      if (tProj < bestT) { bestT = tProj; bestE = e; }
+    let anyHit = false;
+    for (let p = 0; p < pellets; p++) {
+      // Fixed, deterministic, symmetric fan across [-spread, +spread]; the
+      // middle pellet is dead center. No randomness — same aim, same pattern.
+      const ang = (pellets > 1)
+        ? (-spread + (2 * spread) * (p / (pellets - 1)))
+        : 0;
+      const cosA = Math.cos(ang), sinA = Math.sin(ang);
+      const dirX = player.dirX * cosA - player.dirY * sinA;
+      const dirY = player.dirX * sinA + player.dirY * cosA;
+
+      // Same wall-block + ray-vs-circle primitive the pistol uses today.
+      const dWall = castRay(player.x, player.y, dirX, dirY);
+      let bestT = Infinity;
+      let bestE = null;
+      for (let i = 0; i < enemies.length; i++) {
+        const e = enemies[i];
+        if (!e.alive) continue;
+        const lx = e.x - player.x;
+        const ly = e.y - player.y;
+        const tProj = lx * dirX + ly * dirY;
+        if (tProj <= 0 || tProj >= dWall) continue;
+        const perp2 = lx * lx + ly * ly - tProj * tProj;
+        if (perp2 > r2) continue;
+        if (tProj < bestT) { bestT = tProj; bestE = e; }
+      }
+
+      if (bestE) {
+        anyHit = true;
+        bestE.hitFlashUntil = now + ENEMY_FLASH_MS;
+        bestE.hp -= wpn.damage;
+        if (bestE.hp <= 0) {
+          bestE.alive = false;
+          stats.kills++;
+          sfxKill();
+          // hud-feedback-polish: spawn a "+1" pop at the kill location. Cap at
+          // KILL_POP_MAX so a long burst can't grow the array unbounded.
+          if (killPops.length < KILL_POP_MAX) {
+            killPops.push({ x: bestE.x, y: bestE.y, atMs: now, untilMs: now + 500 });
+          }
+        }
+      }
     }
 
-    if (bestE) {
+    // One Bernoulli success iff ANY pellet connected (not the pellet count).
+    if (anyHit) {
       stats.shotsHit++;
       sfxHit();
       hitTintUntil = now + HIT_TINT_MS;
-      bestE.hitFlashUntil = now + ENEMY_FLASH_MS;
-      bestE.hp -= SHOT_DAMAGE;
-      if (bestE.hp <= 0) {
-        bestE.alive = false;
-        stats.kills++;
-        sfxKill();
-        // hud-feedback-polish: spawn a "+1" pop at the kill location. Cap at
-        // KILL_POP_MAX so a long burst can't grow the array unbounded.
-        if (killPops.length < KILL_POP_MAX) {
-          killPops.push({ x: bestE.x, y: bestE.y, atMs: now, untilMs: now + 500 });
-        }
-      }
     }
   }
 
@@ -2972,6 +3166,17 @@
         ammo = Math.min(MAX_AMMO, ammo + amt);
         spawnPickupPop(p.x, p.y, '+' + amt + ' AMMO', 'ammo');
         sfxPickupAmmo();
+        p.alive = false;
+      } else if (p.type === 'weapon_shotgun') {
+        // shotgun-weapon-pickup: grant the shotgun, auto-equip it (re-arm
+        // the equip slide-in), pop + distinct SFX, mark taken. If already
+        // owned, leave it in place and grant nothing — mirrors the
+        // "skip if full" health/ammo pattern (no dup / ammo / re-SFX).
+        if (hasShotgun) continue;
+        hasShotgun = true;
+        setWeapon('shotgun');
+        spawnPickupPop(p.x, p.y, 'SHOTGUN', 'weapon');
+        sfxPickupShotgun();
         p.alive = false;
       }
     }
@@ -3440,7 +3645,9 @@
       const screenX = (halfW * (1 + transformX / transformY)) | 0;
       const screenY = (halfH - 16 * t) | 0;
       const a = 1 - t;
-      const tint = (p.color === 'health') ? '180,255,200' : '255,230,140';
+      const tint = (p.color === 'health') ? '180,255,200'
+                 : (p.color === 'weapon') ? '120,210,255'
+                 : '255,230,140';
       ctx.fillStyle = `rgba(0,0,0,${(a * 0.7).toFixed(3)})`;
       ctx.fillText(p.text, screenX + 1, screenY + 1);
       ctx.fillStyle = `rgba(${tint},${a.toFixed(3)})`;
@@ -3573,6 +3780,27 @@
     ctx.fillStyle = ammoColor;
     ctx.textAlign = 'center';
     ctx.fillText('AMMO  ' + ammo + ' / ' + MAX_AMMO, (W * 0.40) | 0, textY);
+
+    // shotgun-weapon-pickup: compact active-weapon name, a separate token in
+    // the gap between the HP and AMMO readouts (the HP / AMMO / LEVEL / KILLS
+    // strings themselves are unchanged). Drawn at a small fixed font so it
+    // never overflows the strip on the desktop / medium / narrow tiers; its
+    // left edge is anchored just right of the *measured* HP text so it can't
+    // collide with HP, and the small font keeps it clear of AMMO. The rect is
+    // cached for the touch weapon-switch hit-test (same edge-tap precedence as
+    // the util buttons, AC #17).
+    const WPN_FONT_PX = (HUD_FONT_PX >= 16) ? 9 : 10;
+    const hpW = ctx.measureText('HP   ' + (Math.ceil(player.hp) | 0)).width;
+    ctx.font = WPN_FONT_PX + 'px monospace';
+    const wpnName = WEAPONS[weapon].name;
+    const wpnW = ctx.measureText(wpnName).width;
+    const wpnX = 4 + hpW + 6;
+    const wpnY = textY + ((HUD_FONT_PX - WPN_FONT_PX) >> 1);
+    ctx.fillStyle = '#7fd3ff';
+    ctx.textAlign = 'left';
+    ctx.fillText(wpnName, wpnX, wpnY);
+    weaponHudRect = { x: wpnX, y: H - HUD_STRIP_H, w: wpnW, h: HUD_STRIP_H };
+    ctx.font = HUD_FONT_PX + 'px monospace';
 
     // level-exit-progression: LEVEL readout sits between AMMO and KILLS.
     ctx.fillStyle = '#fff';
@@ -4009,6 +4237,81 @@
     return spr;
   }
 
+  // shotgun-weapon-pickup: procedural pump shotgun viewmodel, built once at
+  // startup into the same Uint32Array(GUN_W * GUN_H) / 0-transparent contract
+  // as buildGun() so it drops straight into the existing drawGunViewmodel
+  // blit with no change to the blit math, bob, sway, equip-slide, or shadow.
+  // Flat Doom-style centered framing about the col-35/36 seam; reads as a
+  // shotgun (long twin barrels to the muzzle, wooden pump under the barrel,
+  // broad stock to the lower-rear), visibly chunkier than the pistol.
+  function buildShotgun() {
+    const P = {
+      outline: rgba32( 18,  16,  18),
+      mDark:   rgba32( 45,  47,  55),
+      mMid:    rgba32( 88,  92, 104),
+      mHi:     rgba32(150, 156, 170),
+      wood:    rgba32(112,  72,  40),
+      woodHi:  rgba32(146,  96,  54),
+      woodDk:  rgba32( 72,  46,  24),
+      bore:    rgba32(  8,   8,  10),
+      bead:    rgba32(220, 200,  90),
+    };
+    const spr = new Uint32Array(GUN_W * GUN_H);
+
+    // 1. Buttstock — broad wooden stock to the lower-rear. Drawn first so the
+    //    receiver / trigger guard overlay it. Bottom runs to GUN_H - 1 so the
+    //    existing baseY trim hides the last rows (hand off-frame).
+    const STX = 23, STY = 70, STW = 26, STH = GUN_H - STY;
+    gunFillRect(spr, STX, STY, STW, STH, P.wood);
+    gunFillRect(spr, STX + 1,       STY + 1, 3, STH - 2, P.woodHi);
+    gunFillRect(spr, STX + STW - 4, STY + 1, 3, STH - 2, P.woodDk);
+    for (let yy = STY + 3; yy < GUN_H - 1; yy += 3) {
+      const base = yy * GUN_W;
+      for (let dx = STX + 4; dx <= STX + STW - 5; dx += 3) spr[base + dx] = P.woodDk;
+    }
+    gunOutlineRect(spr, STX, STY, STW, STH, P.outline);
+
+    // 2. Receiver — metal box, wider than the barrel, with an offset
+    //    ejection port. Drawn over the stock's upper edge.
+    gunFillRect(spr, 18, 54, 36, 20, P.mMid);
+    gunFillRect(spr, 20, 55, 32,  2, P.mHi);
+    gunFillRect(spr, 18, 56,  2, 16, P.mDark);
+    gunFillRect(spr, 52, 56,  2, 16, P.mDark);
+    gunFillRect(spr, 39, 58, 12,  5, P.mDark);
+    gunOutlineRect(spr, 18, 54, 36, 20, P.outline);
+
+    // 3. Trigger guard — outline-filled loop hanging below the receiver so
+    //    the world never shows through; centered trigger sliver on the seam.
+    gunFillRect(spr, 28, 74, 16,  9, P.outline);
+    gunFillRect(spr, 30, 76, 12,  5, P.mDark);
+    gunFillRect(spr, 35, 76,  2,  7, P.mMid);
+
+    // 4. Fore-end / pump — broad wooden slide wrapped under the barrels with
+    //    vertical grip ridges so it reads as a pump-action fore-end.
+    gunFillRect(spr, 22, 38, 28, 18, P.wood);
+    gunFillRect(spr, 24, 39, 24,  2, P.woodHi);
+    gunFillRect(spr, 24, 52, 24,  2, P.woodDk);
+    for (let rx = 26; rx <= 46; rx += 4) gunFillRect(spr, rx, 41, 1, 11, P.woodDk);
+    gunOutlineRect(spr, 22, 38, 28, 18, P.outline);
+
+    // 5. Twin barrels — wide block to the muzzle, centered on the seam, with
+    //    a rib between two bores. Anchors the muzzle flash at (36, 6).
+    gunFillRect(spr, 26,  4, 20, 36, P.mMid);
+    gunFillRect(spr, 28,  6,  7, 32, P.mHi);
+    gunFillRect(spr, 37,  6,  7, 32, P.mHi);
+    gunFillRect(spr, 35,  4,  2, 36, P.mDark);
+    gunFillRect(spr, 26,  4, 20,  3, P.mDark);
+    gunFillRect(spr, 29,  4,  5,  4, P.bore);
+    gunFillRect(spr, 38,  4,  5,  4, P.bore);
+    gunOutlineRect(spr, 26, 4, 20, 36, P.outline);
+
+    // 6. Front bead sight — bright nub centered above the muzzle.
+    gunFillRect(spr,    35, 1, 2, 4, P.bead);
+    gunOutlineRect(spr, 35, 1, 2, 4, P.outline);
+
+    return spr;
+  }
+
   function buildFlash1() {
     const spr = new Uint32Array(FLASH_W * FLASH_H);
     const cx = FLASH_W >> 1, cy = FLASH_H >> 1;
@@ -4062,8 +4365,45 @@
   }
 
   const GUN_SPRITE = buildGun();
+  const SHOTGUN_SPRITE = buildShotgun();
   const FLASH_FRAME_1 = buildFlash1();
   const FLASH_FRAME_2 = buildFlash2();
+
+  // shotgun-weapon-pickup: module-scope weapon registry, keyed by id. The
+  // pistol entry reproduces today's exact behavior (FIRE_COOLDOWN_MS,
+  // ammoCost 1, a single ray, SHOT_DAMAGE, the existing GUN_SPRITE, and the
+  // existing BARREL_X/BARREL_Y anchor) so the pistol path stays byte-for-byte
+  // unchanged. kickScale is read in getKickOffsets — pistol is exactly 1.0
+  // (× 1.0 is identity, so pistol kick magnitudes are unchanged); the shotgun
+  // kicks harder through that single multiplier, not a forked state machine.
+  // Defined after the sprites are built; only read from runtime-invoked
+  // functions (fireShot / getKickOffsets / drawGunViewmodel / HUD).
+  const WEAPONS = {
+    pistol: {
+      name: 'PISTOL',
+      cooldownMs: FIRE_COOLDOWN_MS,
+      ammoCost: 1,
+      pellets: 1,
+      spreadRad: 0,
+      damage: SHOT_DAMAGE,
+      sprite: GUN_SPRITE,
+      barrelX: BARREL_X,
+      barrelY: BARREL_Y,
+      kickScale: 1.0,
+    },
+    shotgun: {
+      name: 'SHOTGUN',
+      cooldownMs: SHOTGUN_COOLDOWN_MS,
+      ammoCost: SHOTGUN_AMMO_COST,
+      pellets: SHOTGUN_PELLETS,
+      spreadRad: SHOTGUN_SPREAD_RAD,
+      damage: SHOTGUN_PELLET_DAMAGE,
+      sprite: SHOTGUN_SPRITE,
+      barrelX: 36,
+      barrelY: 6,
+      kickScale: 1.7,
+    },
+  };
 
   // Hitscan-weapon's fireShot() calls this on a successful shot ('shot') and
   // on a dry-fire click with empty mag ('dry'). The dry-fire path uses smaller
@@ -4120,6 +4460,15 @@
       }
       flashFrame = 0;
     }
+    // shotgun-weapon-pickup: per-weapon kick punch. Only the 'shot' kick is
+    // scaled (dry-fire kick stays identical for every weapon, as today).
+    // Pistol kickScale is exactly 1.0 and × 1.0 is an identity on doubles,
+    // so the pistol's kick magnitudes are byte-for-byte unchanged.
+    if (kickKind === 'shot') {
+      const sc = WEAPONS[weapon].kickScale;
+      kickX *= sc;
+      kickY *= sc;
+    }
     return { kickX, kickY, flashFrame };
   }
 
@@ -4152,6 +4501,12 @@
   function drawGunViewmodel() {
     if (player.hp <= 0) return;
 
+    // shotgun-weapon-pickup: sprite + barrel anchor come from the active
+    // weapon. With the pistol selected these are GUN_SPRITE / BARREL_X /
+    // BARREL_Y, so the blit is byte-identical to today.
+    const wpn = WEAPONS[weapon];
+    const sprite = wpn.sprite;
+
     const bobOffX = Math.sin(bobPhase) * 3 * bobIntensity;
     const bobOffY = -Math.abs(Math.sin(bobPhase * 2)) * 2 * bobIntensity;
     const k = getKickOffsets(performance.now());
@@ -4183,15 +4538,15 @@
       for (let sx = 0; sx < GUN_W; sx++) {
         const px = dx + sx;
         if (px < 0 || px >= W) continue;
-        const sc = GUN_SPRITE[sy * GUN_W + sx];
+        const sc = sprite[sy * GUN_W + sx];
         if (sc === 0) continue;
         buf32[py * W + px] = sc;
       }
     }
 
-    // Muzzle flash (saturating add) anchored at the barrel exit.
-    const barrelX = dx + BARREL_X;
-    const barrelY = dy + BARREL_Y;
+    // Muzzle flash (saturating add) anchored at the active weapon's barrel.
+    const barrelX = dx + wpn.barrelX;
+    const barrelY = dy + wpn.barrelY;
     muzzleAnchorX = barrelX;
     muzzleAnchorY = barrelY;
     if (k.flashFrame > 0) {
