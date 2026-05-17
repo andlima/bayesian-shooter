@@ -103,6 +103,17 @@
   const SHOTGUN_PELLET_DAMAGE = 1;
   const SHOTGUN_AMMO_COST     = 3;
   const SHOTGUN_COOLDOWN_MS   = 650;
+  // knife-melee-weapon: always-owned, no-ammo, short-range melee last
+  // resort. Intentionally strictly worse than a gun-with-ammo — a "modest
+  // chip weapon": never a one-shot on a standard enemy (KNIFE_DAMAGE == 2
+  // ⇒ 2 swings to down an imp at HP 3, 3 to down a grunt at HP 5), no
+  // faster than the pistol's 250 ms cooldown, and a short fixed reach
+  // (CONTACT_RADIUS is 0.6, ENEMY_RADIUS 0.4 — the player must close to
+  // near contact-damage range). Adds zero rand() calls (no world pickup,
+  // no ownership flag) so every existing ?seed= layout is byte-identical.
+  const KNIFE_DAMAGE      = 2;     // == SHOT_DAMAGE; > 1 swing to kill
+  const KNIFE_COOLDOWN_MS = 380;   // slower than the pistol's 250 ms
+  const KNIFE_RANGE_CELLS = 1.3;   // short fixed reach (guns are unlimited)
   const ENEMY_RADIUS = 0.4;
   const MAX_HP = 100;
   // pickups-health-ammo: walk-on consumable spawns. Values are clamped
@@ -334,6 +345,11 @@
   // shotgun-weapon-pickup: distinct low "ka-chunk" cue for grabbing the
   // shotgun. ≤ 200 ms, same blip() style; silenced by mute like every cue.
   function sfxPickupShotgun(){ blip({ type: 'square',   freq: 300, endFreq: 520, dur: 0.16, attack: 0.004, decay: 0.15, peak: 0.5 }); }
+  // knife-melee-weapon: short descending "swish" for a melee swing. ≤ 150 ms,
+  // same blip() style; routed through masterGain so the M mute toggle silences
+  // it like every other cue. Audibly distinct from sfxShot (220 Hz square) and
+  // sfxPickupShotgun (rising 300→520 Hz) — a fast high→low sawtooth slash.
+  function sfxKnife()   { blip({ type: 'sawtooth', freq: 1400, endFreq: 280, dur: 0.11, attack: 0.003, decay: 0.1, peak: 0.4 }); }
 
   // enemy-attack-feel-polish: per-type enemy SFX with linear distance rolloff.
   // Caller passes `vol = distanceVolume(srcX, srcY)`; vol === 0 ⇒ early return,
@@ -459,13 +475,18 @@
       forcedThemeIdx = (forcedThemeIdx + 2) % (THEMES.length + 1) - 1;
       themeToggledAtMs = nowMs;
     } else if (e.code === 'Digit1') {
-      // shotgun-weapon-pickup: weapon select. Edge-triggered (the wasDown
-      // guard above drops auto-repeat) and inert during the death freeze,
-      // like the other gameplay keys. Digit2 is a no-op until the shotgun is
-      // owned; KeyQ cycles owned weapons (pistol-only ⇒ no-op).
+      // shotgun-weapon-pickup / knife-melee-weapon: weapon select.
+      // Edge-triggered (the wasDown guard above drops auto-repeat) and
+      // inert during the death freeze, like the other gameplay keys.
+      // Digit2 is a no-op until the shotgun is owned; Digit3 always
+      // selects the knife (always owned, no pickup). KeyQ cycles the
+      // owned weapons — because the knife is always owned it now toggles
+      // pistol ↔ knife in a pistol-only run (no longer a no-op).
       if (player.hp > 0) setWeapon('pistol');
     } else if (e.code === 'Digit2') {
       if (player.hp > 0) setWeapon('shotgun');
+    } else if (e.code === 'Digit3') {
+      if (player.hp > 0) setWeapon('knife');
     } else if (e.code === 'KeyQ') {
       if (player.hp > 0) cycleWeapon();
     }
@@ -578,11 +599,13 @@
         }
         continue;
       }
-      // shotgun-weapon-pickup: weapon-label tap. Same edge-tap precedence as
-      // the util buttons (checked before the tap-or-look slot and consumed),
-      // so a tap there cycles the weapon and never also fires. With only the
-      // pistol owned cycleWeapon() is a visible no-op; the tap is still
-      // consumed (it must not fall through and fire).
+      // shotgun-weapon-pickup / knife-melee-weapon: weapon-label tap. Same
+      // edge-tap precedence as the util buttons (checked before the tap-or-look
+      // slot and consumed), so a tap there cycles through the same owned-weapon
+      // order as Q — pistol → shotgun (if owned) → knife → pistol — and never
+      // also fires. Because the knife is always owned the tap always changes
+      // the weapon now; the tap is still always consumed (it must not fall
+      // through and fire).
       if (weaponLabelHit(fb.x, fb.y)) {
         cycleWeapon();
         touches.set(t.identifier, 'weapon');
@@ -3005,20 +3028,27 @@
     return perp;
   }
 
-  // shotgun-weapon-pickup: weapon selection. setWeapon re-arms the existing
-  // equip slide-in only on an actual change (a redundant Digit1 while already
-  // on the pistol is a no-op, so it never re-pops). The shotgun cannot be
-  // selected while it is not owned. cycleWeapon is a no-op with pistol only.
+  // shotgun-weapon-pickup / knife-melee-weapon: weapon selection. setWeapon
+  // re-arms the existing equip slide-in only on an actual change (a redundant
+  // Digit1/Digit3 while already on that weapon is a no-op, so it never
+  // re-pops). The shotgun cannot be selected while it is not owned; the knife
+  // is always owned (no pickup, no flag) so it is accepted unconditionally.
+  // cycleWeapon walks an explicit, stable owned-weapon order — pistol →
+  // shotgun (if owned) → knife → pistol — so it is no longer a no-op with the
+  // pistol only: it toggles pistol ↔ knife.
   function setWeapon(id) {
     if (id === weapon) return;
     if (id === 'shotgun' && !hasShotgun) return;
-    if (id !== 'pistol' && id !== 'shotgun') return;
+    if (id !== 'pistol' && id !== 'shotgun' && id !== 'knife') return;
     weapon = id;
     equipFramesLeft = EQUIP_FRAMES;
   }
   function cycleWeapon() {
-    if (!hasShotgun) return; // pistol-only: visible no-op
-    setWeapon(weapon === 'pistol' ? 'shotgun' : 'pistol');
+    const order = hasShotgun
+      ? ['pistol', 'shotgun', 'knife']
+      : ['pistol', 'knife'];
+    const i = order.indexOf(weapon);
+    setWeapon(order[(i + 1) % order.length]);
   }
 
   // Fires the currently-selected weapon from its WEAPONS entry. The pistol
@@ -3040,10 +3070,19 @@
       return;
     }
     lastFireTime = now;
+    // knife-melee-weapon: with ammoCost = 0 the dry-fire guard above is never
+    // taken and this is a no-op (Math.max(0, ammo - 0) === ammo), so the
+    // knife consumes no ammo and works at ammo === 0 with no special branch.
     ammo = Math.max(0, ammo - wpn.ammoCost); // shared pool; never below 0
-    stats.shotsFired++;
-    sfxShot();
-    muzzleFlashUntil = now + MUZZLE_FLASH_MS;
+    // knife-melee-weapon: accuracy counters are gated on the registry's
+    // tracksAccuracy flag (true for the guns, false for the knife) — a melee
+    // swing is a different action and must not pollute shotsHit/shotsFired.
+    // stats.kills is NOT gated (a knife kill still counts). The fire cue and
+    // muzzle flash are likewise registry-driven: the guns play sfxShot + the
+    // flash, the knife plays its distinct swing cue and shows no flash.
+    if (wpn.tracksAccuracy) stats.shotsFired++;
+    wpn.fireSfx();
+    if (wpn.muzzleFlash) muzzleFlashUntil = now + MUZZLE_FLASH_MS;
     onPlayerFire('shot');
 
     const pellets = wpn.pellets;
@@ -3061,7 +3100,12 @@
       const dirY = player.dirX * sinA + player.dirY * cosA;
 
       // Same wall-block + ray-vs-circle primitive the pistol uses today.
+      // knife-melee-weapon: clamp the hittable distance to the weapon's
+      // range. The guns' range is Infinity, so min(dWall, Infinity) === dWall
+      // exactly and their hit bound is byte-identical to pre-change; the
+      // knife caps it to its short KNIFE_RANGE_CELLS reach.
       const dWall = castRay(player.x, player.y, dirX, dirY);
+      const dMax = Math.min(dWall, wpn.range);
       let bestT = Infinity;
       let bestE = null;
       for (let i = 0; i < enemies.length; i++) {
@@ -3070,7 +3114,7 @@
         const lx = e.x - player.x;
         const ly = e.y - player.y;
         const tProj = lx * dirX + ly * dirY;
-        if (tProj <= 0 || tProj >= dWall) continue;
+        if (tProj <= 0 || tProj >= dMax) continue;
         const perp2 = lx * lx + ly * ly - tProj * tProj;
         if (perp2 > r2) continue;
         if (tProj < bestT) { bestT = tProj; bestE = e; }
@@ -3094,8 +3138,10 @@
     }
 
     // One Bernoulli success iff ANY pellet connected (not the pellet count).
+    // knife-melee-weapon: shotsHit is gated on tracksAccuracy too, but the
+    // hit-tint and hit SFX still fire for a connecting knife swing.
     if (anyHit) {
-      stats.shotsHit++;
+      if (wpn.tracksAccuracy) stats.shotsHit++;
       sfxHit();
       hitTintUntil = now + HIT_TINT_MS;
     }
@@ -4312,6 +4358,72 @@
     return spr;
   }
 
+  // knife-melee-weapon: procedural combat-knife viewmodel, built once at
+  // startup into the same Uint32Array(GUN_W * GUN_H) / 0-transparent contract
+  // as buildGun()/buildShotgun() so it drops straight into the existing
+  // drawGunViewmodel blit (no change to the blit math, bob, sway, equip-slide,
+  // or shadow). Flat Doom-style centered framing about the col-35/36 seam:
+  // a tapered steel blade with a center bevel ridge, a metal crossguard, and a
+  // wrapped grip running off-frame at the bottom — visibly neither gun.
+  function buildKnife() {
+    const P = {
+      outline:  rgba32( 16,  16,  20),
+      bladeDk:  rgba32(118, 124, 138),
+      bladeMid: rgba32(168, 176, 192),
+      bladeHi:  rgba32(226, 232, 244),
+      edge:     rgba32(246, 249, 255),
+      guard:    rgba32( 74,  76,  84),
+      guardHi:  rgba32(116, 120, 132),
+      grip:     rgba32( 72,  46,  28),
+      gripHi:   rgba32( 98,  64,  38),
+      gripDk:   rgba32( 44,  28,  16),
+    };
+    const spr = new Uint32Array(GUN_W * GUN_H);
+    const cx = 36;
+
+    // 1. Point — a short bright nub above the blade so the tip reads sharp.
+    gunFillRect(spr, cx - 1, 4, 2, 3, P.outline);
+    gunFillRect(spr, cx - 1, 5, 2, 2, P.bladeHi);
+
+    // 2. Blade — symmetric triangular taper from the tip (y 7) to the guard
+    //    (y 52): a 1-px outlined border, a bright sharpened edge on the left,
+    //    a darker spine on the right, and a center bevel-ridge highlight.
+    const TIP_Y = 7, GUARD_Y = 52;
+    for (let y = TIP_Y; y < GUARD_Y; y++) {
+      const f  = (y - TIP_Y) / (GUARD_Y - TIP_Y); // 0 at tip → 1 at guard
+      const hw = 2 + Math.round(f * 7);            // half-width 2 → 9
+      gunFillRect(spr, cx - hw,     y, hw * 2,     1, P.outline);
+      gunFillRect(spr, cx - hw + 1, y, hw * 2 - 2, 1, P.bladeMid);
+      gunFillRect(spr, cx - hw + 1, y, 2,          1, P.edge);     // sharp edge
+      gunFillRect(spr, cx + hw - 3, y, 2,          1, P.bladeDk);  // spine
+      gunFillRect(spr, cx - 1,      y, 2,          1, P.bladeHi);  // ridge
+    }
+
+    // 3. Crossguard — metal bar wider than the blade base, with a top
+    //    highlight strip; outlined so it reads as a separate part.
+    gunFillRect(spr,    20, 51, 32, 8, P.guard);
+    gunFillRect(spr,    22, 52, 28, 2, P.guardHi);
+    gunOutlineRect(spr, 20, 51, 32, 8, P.outline);
+
+    // 4. Grip — wrapped handle, centered on the seam, with mirrored highlight
+    //    stripes hugging the side walls and diagonal wrap bands. Bottom runs
+    //    to GUN_H - 1 so the existing baseY trim hides the last rows (hand
+    //    off-frame), exactly like the pistol/shotgun grips.
+    const GX = 28, GY = 58, GW = 16, GH = GUN_H - GY;
+    gunFillRect(spr, GX, GY, GW, GH, P.grip);
+    gunFillRect(spr, GX + 1,      GY + 1, 2, GH - 2, P.gripHi);
+    gunFillRect(spr, GX + GW - 3, GY + 1, 2, GH - 2, P.gripHi);
+    for (let yy = GY + 3; yy < GUN_H - 1; yy += 4) {
+      gunFillRect(spr, GX + 2, yy, GW - 4, 1, P.gripDk);
+    }
+    // Pommel — slightly wider cap, kept above the baseY trim so it's visible.
+    gunFillRect(spr,    GX - 2, GUN_H - 14, GW + 4, 6, P.guard);
+    gunOutlineRect(spr, GX - 2, GUN_H - 14, GW + 4, 6, P.outline);
+    gunOutlineRect(spr, GX, GY, GW, GH, P.outline);
+
+    return spr;
+  }
+
   function buildFlash1() {
     const spr = new Uint32Array(FLASH_W * FLASH_H);
     const cx = FLASH_W >> 1, cy = FLASH_H >> 1;
@@ -4366,16 +4478,33 @@
 
   const GUN_SPRITE = buildGun();
   const SHOTGUN_SPRITE = buildShotgun();
+  const KNIFE_SPRITE = buildKnife();
   const FLASH_FRAME_1 = buildFlash1();
   const FLASH_FRAME_2 = buildFlash2();
 
-  // shotgun-weapon-pickup: module-scope weapon registry, keyed by id. The
-  // pistol entry reproduces today's exact behavior (FIRE_COOLDOWN_MS,
-  // ammoCost 1, a single ray, SHOT_DAMAGE, the existing GUN_SPRITE, and the
-  // existing BARREL_X/BARREL_Y anchor) so the pistol path stays byte-for-byte
-  // unchanged. kickScale is read in getKickOffsets — pistol is exactly 1.0
-  // (× 1.0 is identity, so pistol kick magnitudes are unchanged); the shotgun
-  // kicks harder through that single multiplier, not a forked state machine.
+  // shotgun-weapon-pickup / knife-melee-weapon: module-scope weapon registry,
+  // keyed by id. The pistol entry reproduces today's exact behavior
+  // (FIRE_COOLDOWN_MS, ammoCost 1, a single ray, SHOT_DAMAGE, the existing
+  // GUN_SPRITE, and the existing BARREL_X/BARREL_Y anchor) so the pistol path
+  // stays byte-for-byte unchanged. kickScale is read in getKickOffsets —
+  // pistol is exactly 1.0 (× 1.0 is identity, so pistol kick magnitudes are
+  // unchanged); the shotgun kicks harder through that single multiplier, not
+  // a forked state machine.
+  //
+  // Every entry carries the same property set so fireShot/drawGunViewmodel
+  // stay data-driven, not branched on a weapon id:
+  //   range          — hittable-distance cap. The guns are unlimited-range
+  //                     hitscan, so range is Infinity and min(wallDist,
+  //                     Infinity) === wallDist keeps them byte-identical; the
+  //                     knife caps to its short KNIFE_RANGE_CELLS reach.
+  //   tracksAccuracy  — true for the guns (a knife swing is a different
+  //                     action and must not move shotsHit/shotsFired; kills
+  //                     still count and are NOT gated on this).
+  //   fireSfx         — the cue a successful trigger pull plays (gunshot vs.
+  //                     the knife's distinct swing swish).
+  //   muzzleFlash     — whether a pull shows the muzzle flash + wash. False
+  //                     for the knife (it still reuses the 'shot' kick for a
+  //                     melee-lunge feel; only the flash is suppressed).
   // Defined after the sprites are built; only read from runtime-invoked
   // functions (fireShot / getKickOffsets / drawGunViewmodel / HUD).
   const WEAPONS = {
@@ -4390,6 +4519,10 @@
       barrelX: BARREL_X,
       barrelY: BARREL_Y,
       kickScale: 1.0,
+      range: Infinity,
+      tracksAccuracy: true,
+      fireSfx: sfxShot,
+      muzzleFlash: true,
     },
     shotgun: {
       name: 'SHOTGUN',
@@ -4402,6 +4535,33 @@
       barrelX: 36,
       barrelY: 6,
       kickScale: 1.7,
+      range: Infinity,
+      tracksAccuracy: true,
+      fireSfx: sfxShot,
+      muzzleFlash: true,
+    },
+    // knife-melee-weapon: always owned (no world pickup, no ownership flag).
+    // Single forward ray like the pistol's geometry (pellets 1, spreadRad 0),
+    // ammoCost 0 (no ammo, never dry-fires — falls out of the data model:
+    // the existing `ammo < 0` guard is never true and Math.max(0, ammo - 0)
+    // is a no-op). Short range, excluded from accuracy, its own swing cue,
+    // no muzzle flash. barrelX/barrelY kept for property-set uniformity
+    // though no flash is ever drawn for the knife.
+    knife: {
+      name: 'KNIFE',
+      cooldownMs: KNIFE_COOLDOWN_MS,
+      ammoCost: 0,
+      pellets: 1,
+      spreadRad: 0,
+      damage: KNIFE_DAMAGE,
+      sprite: KNIFE_SPRITE,
+      barrelX: BARREL_X,
+      barrelY: BARREL_Y,
+      kickScale: 1.0,
+      range: KNIFE_RANGE_CELLS,
+      tracksAccuracy: false,
+      fireSfx: sfxKnife,
+      muzzleFlash: false,
     },
   };
 
@@ -4549,7 +4709,11 @@
     const barrelY = dy + wpn.barrelY;
     muzzleAnchorX = barrelX;
     muzzleAnchorY = barrelY;
-    if (k.flashFrame > 0) {
+    // knife-melee-weapon: the knife reuses the 'shot' kick (so getKickOffsets
+    // still yields flashFrame > 0 for the lunge), but it must draw NO muzzle
+    // flash — gate the flash blit on the registry's muzzleFlash. The guns
+    // have muzzleFlash = true, so their flash is byte-identical to pre-change.
+    if (k.flashFrame > 0 && wpn.muzzleFlash) {
       const flash = (k.flashFrame === 1) ? FLASH_FRAME_1 : FLASH_FRAME_2;
       const fdx = barrelX - (FLASH_W >> 1);
       const fdy = barrelY - (FLASH_H >> 1);
