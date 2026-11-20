@@ -3,8 +3,13 @@ id: textured-surfaces
 area: frontend
 priority: 50
 depends_on: [raycaster-mvp]
+obsolete: true
 description: Procedural textures for walls, floor, and ceiling, generated at startup and sampled per pixel
 ---
+
+> **Obsolete.** This spec was delivered by the `textured-surfaces-rerun` task
+> (PR #19) after the original attempt (PR #17) hit unresolvable merge conflicts.
+> It is kept for reference only and must not be dispatched again.
 
 # Textured Surfaces — Walls, Floor, and Ceiling Get Pixel Art
 
