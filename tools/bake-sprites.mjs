@@ -39,7 +39,7 @@
 //       Read that text format and write an 8-bit RGBA PNG.
 //
 // Encoding in index.html (per manifest entry):
-//     "GUN_SPRITE": { w: 72, h: 96, pal: [4279440660, …], rle: "AQIB…" },
+//     "VM_PISTOL_IDLE": { w: 96, h: 104, pal: [4279440660, …], rle: "AQIB…" },
 //   pal  — distinct non-zero rgba32 words, sorted ascending as unsigned
 //          32-bit integers (≤ 255 entries).
 //   rle  — base64 of (runLength, index) byte pairs over the row-major index
@@ -92,11 +92,17 @@ export const MANIFEST = [
   { file: 'ammo_small.png',     binding: 'ammoSmallFrame',     w: 32, h: 32 },
   { file: 'ammo_large.png',     binding: 'ammoLargeFrame',     w: 32, h: 32 },
   { file: 'pickup_shotgun.png', binding: 'weaponShotgunFrame', w: 32, h: 32 },
-  { file: 'vm_pistol.png',      binding: 'GUN_SPRITE',         w: 72, h: 96 },
-  { file: 'vm_shotgun.png',     binding: 'SHOTGUN_SPRITE',     w: 72, h: 96 },
-  { file: 'vm_knife.png',       binding: 'KNIFE_SPRITE',       w: 72, h: 96 },
-  { file: 'flash_1.png',        binding: 'FLASH_FRAME_1',      w: 24, h: 24 },
-  { file: 'flash_2.png',        binding: 'FLASH_FRAME_2',      w: 24, h: 24 },
+  { file: 'vm_pistol_idle.png',  binding: 'VM_PISTOL_IDLE',    w: 96, h: 104 },
+  { file: 'vm_pistol_fire.png',  binding: 'VM_PISTOL_FIRE',    w: 96, h: 104 },
+  { file: 'vm_shotgun_idle.png', binding: 'VM_SHOTGUN_IDLE',   w: 96, h: 104 },
+  { file: 'vm_shotgun_fire.png', binding: 'VM_SHOTGUN_FIRE',   w: 96, h: 104 },
+  { file: 'vm_shotgun_pump.png', binding: 'VM_SHOTGUN_PUMP',   w: 96, h: 104 },
+  { file: 'vm_knife_idle.png',   binding: 'VM_KNIFE_IDLE',     w: 96, h: 104 },
+  { file: 'vm_knife_slash.png',  binding: 'VM_KNIFE_SLASH',    w: 96, h: 104 },
+  { file: 'flash_pistol_1.png',  binding: 'FLASH_PISTOL_1',    w: 24, h: 24 },
+  { file: 'flash_pistol_2.png',  binding: 'FLASH_PISTOL_2',    w: 24, h: 24 },
+  { file: 'flash_shotgun_1.png', binding: 'FLASH_SHOTGUN_1',   w: 40, h: 40 },
+  { file: 'flash_shotgun_2.png', binding: 'FLASH_SHOTGUN_2',   w: 40, h: 40 },
 ];
 
 // ---------------------------------------------------------------------------
