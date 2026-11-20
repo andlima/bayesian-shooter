@@ -16,11 +16,11 @@ existing license.
 |------|---------|------|--------|
 | `imp_1.png`, `imp_2.png` | `impFrame1`, `impFrame2` | 32×32 | Seeded from the repo's prior procedural art (imp idle, 2 frames) |
 | `grunt_1.png`, `grunt_2.png` | `gruntFrame1`, `gruntFrame2` | 32×32 | Seeded from the repo's prior procedural art (grunt idle, 2 frames) |
-| `exit.png` | `exitFrame` | 32×32 | Seeded from the repo's prior procedural art (exit pillar) |
-| `proj_imp.png` | `impProjFrame` | 32×32 | Seeded from the repo's prior procedural art (imp fireball) |
-| `proj_grunt.png` | `gruntProjFrame` | 32×32 | Seeded from the repo's prior procedural art (grunt bolt) |
-| `medkit_small.png`, `medkit_large.png` | `medkitSmallFrame`, `medkitLargeFrame` | 32×32 | Seeded from the repo's prior procedural art (health pickups) |
-| `ammo_small.png`, `ammo_large.png` | `ammoSmallFrame`, `ammoLargeFrame` | 32×32 | Seeded from the repo's prior procedural art (ammo pickups) |
+| `exit_1.png`, `exit_2.png` | `exitFrame1`, `exitFrame2` | 32×32 | Original to this repo (`world-sprite-art-pass`): floor pad + light beam, 2-frame pulse |
+| `proj_imp_1.png`, `proj_imp_2.png` | `impProjFrame1`, `impProjFrame2` | 32×32 | Original to this repo (`world-sprite-art-pass`): imp fireball, 2-frame flicker |
+| `proj_grunt_1.png`, `proj_grunt_2.png` | `gruntProjFrame1`, `gruntProjFrame2` | 32×32 | Original to this repo (`world-sprite-art-pass`): grunt plasma bolt, 2-frame flicker |
+| `medkit_small.png`, `medkit_large.png` | `medkitSmallFrame`, `medkitLargeFrame` | 32×32 | Original to this repo (`world-sprite-art-pass`): bevelled 3/4-view medkits |
+| `ammo_small.png`, `ammo_large.png` | `ammoSmallFrame`, `ammoLargeFrame` | 32×32 | Original to this repo (`world-sprite-art-pass`): bevelled 3/4-view ammo crates |
 | `pickup_shotgun.png` | `weaponShotgunFrame` | 32×32 | Original to this repo (weapon-viewmodel-art-pass: shotgun pickup redrawn to match the viewmodel) |
 | `vm_pistol_idle.png`, `vm_pistol_fire.png` | `VM_PISTOL_IDLE`, `VM_PISTOL_FIRE` | 96×104 | Original to this repo (weapon-viewmodel-art-pass: pistol viewmodel, idle + slide-back) |
 | `vm_shotgun_idle.png`, `vm_shotgun_fire.png`, `vm_shotgun_pump.png` | `VM_SHOTGUN_IDLE`, `VM_SHOTGUN_FIRE`, `VM_SHOTGUN_PUMP` | 96×104 | Original to this repo (weapon-viewmodel-art-pass: shotgun viewmodel, idle + recoil + pump) |
