@@ -21,11 +21,11 @@ existing license.
 | `grunt_walk_1.png`, `grunt_walk_2.png` | `gruntWalk1`, `gruntWalk2` | 32×32 | Original to this repo (enemy-sprite-art-pass): grunt walk cycle, 2 frames, native 32×32 |
 | `grunt_wind.png` | `gruntWind` | 32×32 | Original to this repo (enemy-sprite-art-pass): grunt wind-up pose, rifle shouldered |
 | `grunt_fire.png` | `gruntFire` | 32×32 | Original to this repo (enemy-sprite-art-pass): grunt fire pose, rifle recoil with muzzle raised |
-| `exit.png` | `exitFrame` | 32×32 | Seeded from the repo's prior procedural art (exit pillar) |
-| `proj_imp.png` | `impProjFrame` | 32×32 | Seeded from the repo's prior procedural art (imp fireball) |
-| `proj_grunt.png` | `gruntProjFrame` | 32×32 | Seeded from the repo's prior procedural art (grunt bolt) |
-| `medkit_small.png`, `medkit_large.png` | `medkitSmallFrame`, `medkitLargeFrame` | 32×32 | Seeded from the repo's prior procedural art (health pickups) |
-| `ammo_small.png`, `ammo_large.png` | `ammoSmallFrame`, `ammoLargeFrame` | 32×32 | Seeded from the repo's prior procedural art (ammo pickups) |
+| `exit_1.png`, `exit_2.png` | `exitFrame1`, `exitFrame2` | 32×32 | Original to this repo (`world-sprite-art-pass`): floor pad + light beam, 2-frame pulse |
+| `proj_imp_1.png`, `proj_imp_2.png` | `impProjFrame1`, `impProjFrame2` | 32×32 | Original to this repo (`world-sprite-art-pass`): imp fireball, 2-frame flicker |
+| `proj_grunt_1.png`, `proj_grunt_2.png` | `gruntProjFrame1`, `gruntProjFrame2` | 32×32 | Original to this repo (`world-sprite-art-pass`): grunt plasma bolt, 2-frame flicker |
+| `medkit_small.png`, `medkit_large.png` | `medkitSmallFrame`, `medkitLargeFrame` | 32×32 | Original to this repo (`world-sprite-art-pass`): bevelled 3/4-view medkits |
+| `ammo_small.png`, `ammo_large.png` | `ammoSmallFrame`, `ammoLargeFrame` | 32×32 | Original to this repo (`world-sprite-art-pass`): bevelled 3/4-view ammo crates |
 | `pickup_shotgun.png` | `weaponShotgunFrame` | 32×32 | Seeded from the repo's prior procedural art (shotgun pickup) |
 | `vm_pistol.png` | `GUN_SPRITE` | 72×96 | Seeded from the repo's prior procedural art (pistol viewmodel) |
 | `vm_shotgun.png` | `SHOTGUN_SPRITE` | 72×96 | Seeded from the repo's prior procedural art (shotgun viewmodel) |
