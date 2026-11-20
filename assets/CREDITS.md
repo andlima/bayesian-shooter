@@ -3,18 +3,24 @@
 ## Sprites — `assets/sprites/`
 
 Every PNG below is listed in `MANIFEST` in `tools/bake-sprites.mjs` and
-baked into `index.html` by `make bake`. All of them are **seeded from this
-repository's prior procedural art**: each file was produced by running the
-game's original hand-written builder (ASCII rows or rect-fill code) once and
-writing the resulting pixels out as an 8-bit RGBA PNG, so it is
-pixel-identical to the pre-pipeline output. None of it is third-party art;
-no external attribution is required and it is covered by this repository's
+baked into `index.html` by `make bake`. Every file is **original to this
+repository**. Most are *seeded from the repo's prior procedural art*: each
+was produced by running the game's original hand-written builder (ASCII rows
+or rect-fill code) once and writing the resulting pixels out as an 8-bit RGBA
+PNG, so it is pixel-identical to the pre-pipeline output. The imp and grunt
+frames were hand-drawn in-repo for `enemy-sprite-art-pass` via the
+`--dump` / `--encode` text workflow. None of it is third-party art; no
+external attribution is required and it is covered by this repository's
 existing license.
 
 | File | Binding | Size | Source |
 |------|---------|------|--------|
-| `imp_1.png`, `imp_2.png` | `impFrame1`, `impFrame2` | 32×32 | Seeded from the repo's prior procedural art (imp idle, 2 frames) |
-| `grunt_1.png`, `grunt_2.png` | `gruntFrame1`, `gruntFrame2` | 32×32 | Seeded from the repo's prior procedural art (grunt idle, 2 frames) |
+| `imp_walk_1.png`, `imp_walk_2.png` | `impWalk1`, `impWalk2` | 32×32 | Original to this repo (enemy-sprite-art-pass): imp walk cycle, 2 frames, native 32×32 |
+| `imp_wind.png` | `impWind` | 32×32 | Original to this repo (enemy-sprite-art-pass): imp wind-up pose, fireball forming in raised palm |
+| `imp_fire.png` | `impFire` | 32×32 | Original to this repo (enemy-sprite-art-pass): imp fire pose, arm thrust forward |
+| `grunt_walk_1.png`, `grunt_walk_2.png` | `gruntWalk1`, `gruntWalk2` | 32×32 | Original to this repo (enemy-sprite-art-pass): grunt walk cycle, 2 frames, native 32×32 |
+| `grunt_wind.png` | `gruntWind` | 32×32 | Original to this repo (enemy-sprite-art-pass): grunt wind-up pose, rifle shouldered |
+| `grunt_fire.png` | `gruntFire` | 32×32 | Original to this repo (enemy-sprite-art-pass): grunt fire pose, rifle recoil with muzzle raised |
 | `exit_1.png`, `exit_2.png` | `exitFrame1`, `exitFrame2` | 32×32 | Original to this repo (`world-sprite-art-pass`): floor pad + light beam, 2-frame pulse |
 | `proj_imp_1.png`, `proj_imp_2.png` | `impProjFrame1`, `impProjFrame2` | 32×32 | Original to this repo (`world-sprite-art-pass`): imp fireball, 2-frame flicker |
 | `proj_grunt_1.png`, `proj_grunt_2.png` | `gruntProjFrame1`, `gruntProjFrame2` | 32×32 | Original to this repo (`world-sprite-art-pass`): grunt plasma bolt, 2-frame flicker |
@@ -40,7 +46,7 @@ CC0 sprites in a one-step follow-up:
    this repo. CC0 / public-domain art still warrants a courtesy credit:
 
    ```
-   | imp_1.png, imp_2.png | Imp | "<Asset name>" by <Author>,
+   | imp_walk_1.png, imp_walk_2.png | Imp | "<Asset name>" by <Author>,
    <source URL> — CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
    ```
 
