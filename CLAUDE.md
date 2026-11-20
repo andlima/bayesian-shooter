@@ -1,15 +1,27 @@
 # Claude Code – Agent-Specific Notes
 
-> **Read `AGENTS.md` first** — it contains all project context, workflow, and conventions.
-> This file is strictly additive — it must never contradict or duplicate AGENTS.md content.
+> Read `AGENTS.md` first. It is the project's source of truth; this file is
+> strictly additive and must not contradict or duplicate it.
 
-## Worktree-Only Editing — Read This First
+## Orchestrated sessions
 
-Before making **any** file changes, read the "Worktree-Only Editing Rule" section in
-`AGENTS.md`. Claude Code auto-loads this file but not `AGENTS.md`, so this reminder
-exists to prevent the most common mistake: editing directly in the main checkout.
+When `spec` launches a non-interactive Claude session, the execution backend,
+generated settings, and launch arguments define its permissions. Do not try to
+loosen or work around those controls from inside the session. If a required
+host tool or credential is unavailable, report `needs-input` or `blocked` as
+described in `AGENTS.md`.
 
-## Tool Preferences
+Never extract a user's GitHub token into shell commands or replace `gh` with a
+hand-written authenticated `curl` request. Forge publication and merge remain
+host-orchestrator responsibilities during an implementation run.
+
+## Local settings
+
+- `.claude/settings.json` contains project-level settings and may be committed.
+- `.claude/settings.local.json` contains personal overrides and should remain
+  gitignored.
+
+## Tool preferences
 
 - Use **Edit** (string replacement) for modifying existing files; avoid sed/awk
 - Use **Glob** and **Grep** for file/content search; avoid shell find/grep
@@ -21,21 +33,9 @@ exists to prevent the most common mistake: editing directly in the main checkout
 Claude Code stores project memory in `~/.claude/projects/…/memory/`. Consult memory
 files at the start of each session to build on previous experience.
 
-## GitHub CLI (`gh`) in Sandbox
+## GitHub CLI (`gh`) in interactive sessions
 
-The sandbox proxy causes TLS certificate errors with `gh` (Go's strict TLS verification
-rejects the proxy's cert). **Use `curl` with a token instead**:
-
-```bash
-GH_TOKEN=$(gh auth token 2>/dev/null)
-curl -s -H "Authorization: token $GH_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/OWNER/REPO/..."
-```
-
-`git push` works fine through the proxy — only `gh` API calls are affected.
-
-## Permissions
-
-- `.claude/settings.json` — project-level permission allowlists (committed)
-- `.claude/settings.local.json` — personal overrides (git-ignored)
+The Claude Code sandbox proxy breaks `gh`'s TLS verification. In an interactive
+session, run `gh` with the sandbox disabled rather than substituting a
+token-bearing `curl` request. `git push` works fine through the proxy. Inside an
+orchestrated `spec` run, publication stays with the orchestrator (see above).

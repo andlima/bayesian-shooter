@@ -7,6 +7,7 @@ description: Short one-line description of the feature
 ---
 
 To permanently exclude a spec from dispatch, add `obsolete: true` to frontmatter.
+To keep it out of dispatch temporarily, use `spec hold <id> --reason TEXT` instead.
 
 # Example Feature
 
@@ -16,9 +17,9 @@ Describe what this spec achieves and why it matters. Keep it to 2-3 sentences.
 
 ## Acceptance Criteria
 
-1. First concrete, testable requirement
-2. Second requirement
-3. Third requirement
+- [ ] First concrete, testable requirement
+- [ ] Second requirement
+- [ ] Third requirement
 
 ## Out of Scope
 

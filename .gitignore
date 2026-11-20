@@ -2,4 +2,9 @@
 .worktrees/
 .claude/settings.local.json
 .codex/
-/.spec-workspaces/
+.venv/
+.spec-workspaces/
+.spec.local.toml
+.claude/mcp-servers.json
+.spec-claude-home/
+.spec-codex-home/
