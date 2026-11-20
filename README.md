@@ -78,11 +78,13 @@ through the dungeon. Walk over one to pick it up; pickups left at full HP
   column. Sprites are drawn as sorted billboards against a per-column
   z-buffer, so walls correctly occlude enemies and enemies correctly
   occlude each other.
-- The dungeon, wall/floor/ceiling textures, enemy sprites, the gun
-  viewmodel, and the muzzle flash are all generated procedurally at
-  startup. Generators use a seeded LCG; `Math.random()` is forbidden in
-  generator paths, so the first rendered frame is byte-identical across
-  reloads.
+- The dungeon and the wall/floor/ceiling textures are generated
+  procedurally at startup. Generators use a seeded LCG; `Math.random()` is
+  forbidden in generator paths, so the first rendered frame is byte-identical
+  across reloads. Sprite art (enemies, pickups, the exit, projectiles, the
+  weapon viewmodels and the muzzle flash) is PNG-sourced from
+  `assets/sprites/` and baked into the single file as compact palette +
+  run-length data by `tools/bake-sprites.mjs`; nothing is fetched at runtime.
 - Atmosphere lighting (distance fog + sky/ground gradient + vignette) is a
   post-pass over the textured world, toggled with `L`. The gun viewmodel
   is drawn last, into the same framebuffer, with bob, kick, and a brief
