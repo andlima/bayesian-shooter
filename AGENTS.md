@@ -19,26 +19,35 @@ The `spec` command is the primary interface for humans and agents.
 | Command | What it does |
 |---------|-------------|
 | `spec create [--spec ID]` | Author a new spec interactively |
-| `spec implement --spec ID [--agent claude\|codex] [--review-agent claude\|codex]` | Start/resume implementation workflow |
+| `spec implement --spec ID [--agent claude\|codex] [--review-agent claude\|codex] [--ignore-hold]` | Start/resume implementation workflow (refuses a held spec unless `--ignore-hold`) |
 | `spec status --spec ID` | Show run state and gate status |
 | `spec list [--all]` | List specs with status and dependencies |
 | `spec show --spec ID` | Display a spec's content |
 | `spec report --status ok\|blocked\|error\|needs-input` | Report implement-phase completion |
-| `spec clean --spec ID` | Remove worktrees and branches |
+| `spec stop --spec ID` | Stop an active run without deleting its workspace |
+| `spec hold ID --reason TEXT` | Hold a spec out of `spec auto run` with a pushed `spec/hold/<id>` tag |
+| `spec unhold ID` | Release a hold (deletes `spec/hold/<id>` on origin, then locally) |
+| `spec clean --spec ID` | Remove execution workspaces and branches |
 | `spec task [--agent claude\|codex] [--review-agent claude\|codex]` | Describe and execute a quick task |
 
-### Worktree-Only Editing Rule
+### Isolated Workspace Editing Rule
 
 **Never edit files in the main worktree.** The main worktree is for
 orchestration only — running `spec implement`, `spec status`, etc. All file
-changes must happen in a dedicated worktree.
+changes must happen in the isolated workspace provided by the execution
+backend.
 
 ### Implement Agent Contract
 
 When launched by the orchestrator for `implement`, follow this contract:
 
 1. **Read context first** — read the spec file and `AGENTS.md` before editing.
-2. **Stay in the provided worktree** — do not switch branches or start another run.
+2. **Stay in the provided workspace** — do not start another run, and leave
+   the run's branch checked out when you finish.
+   - You may use git freely: `add`, `commit`, `stash`, `branch`, `rebase`,
+     `log`, and `fetch` from origin. Your commit identity is already set.
+   - Do not push or open pull requests; publishing stays with the orchestrator.
+   - Repository Git config and hooks are read-only inside the session.
 3. **Apply only this attempt's scope**:
    - Initial/retry: implement remaining spec work
    - Verify retry: fix the failing gate output provided by orchestrator
@@ -51,14 +60,18 @@ When launched by the orchestrator for `implement`, follow this contract:
    (see step 6).
 6. **Report completion before exit**:
    ```bash
-   spec report --status ok|blocked|error|needs-input --summary "..."
+   spec report --status ok|blocked|error|needs-input --summary 'plain text summary'
    ```
+   Keep the summary shell-safe: single-quote the complete value, avoid
+   apostrophes, and do not include backticks or `$()`. Describe commands without
+   Markdown code delimiters because the shell evaluates substitutions before
+   `spec report` starts.
    Use `needs-input` when the spec is genuinely ambiguous and a wrong guess
    would waste retry cycles. Describe the ambiguity and include specific
    options when possible.
    Wait for `Completion recorded for <spec-id>:` before exiting.
 
-### Branch and Worktree Conventions
+### Default Worktree-Backend Conventions
 
 | Type | Branch | Worktree |
 |------|--------|----------|
