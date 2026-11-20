@@ -4,11 +4,13 @@
 
 Every PNG below is listed in `MANIFEST` in `tools/bake-sprites.mjs` and
 baked into `index.html` by `make bake`. Every file is **original to this
-repository**. Most are *seeded from the repo's prior procedural art*: each
+repository**. Some are *seeded from the repo's prior procedural art*: each
 was produced by running the game's original hand-written builder (ASCII rows
 or rect-fill code) once and writing the resulting pixels out as an 8-bit RGBA
-PNG, so it is pixel-identical to the pre-pipeline output. The imp and grunt
-frames were hand-drawn in-repo for `enemy-sprite-art-pass` via the
+PNG, so it is pixel-identical to the pre-pipeline output. The rest are
+**hand-authored pixel art drawn in-repo**: the imp and grunt frames for
+`enemy-sprite-art-pass`, and the weapon viewmodels, muzzle flashes and
+shotgun pickup for `weapon-viewmodel-art-pass`, both via the
 `--dump` / `--encode` text workflow. None of it is third-party art; no
 external attribution is required and it is covered by this repository's
 existing license.
@@ -26,11 +28,12 @@ existing license.
 | `proj_grunt_1.png`, `proj_grunt_2.png` | `gruntProjFrame1`, `gruntProjFrame2` | 32×32 | Original to this repo (`world-sprite-art-pass`): grunt plasma bolt, 2-frame flicker |
 | `medkit_small.png`, `medkit_large.png` | `medkitSmallFrame`, `medkitLargeFrame` | 32×32 | Original to this repo (`world-sprite-art-pass`): bevelled 3/4-view medkits |
 | `ammo_small.png`, `ammo_large.png` | `ammoSmallFrame`, `ammoLargeFrame` | 32×32 | Original to this repo (`world-sprite-art-pass`): bevelled 3/4-view ammo crates |
-| `pickup_shotgun.png` | `weaponShotgunFrame` | 32×32 | Seeded from the repo's prior procedural art (shotgun pickup) |
-| `vm_pistol.png` | `GUN_SPRITE` | 72×96 | Seeded from the repo's prior procedural art (pistol viewmodel) |
-| `vm_shotgun.png` | `SHOTGUN_SPRITE` | 72×96 | Seeded from the repo's prior procedural art (shotgun viewmodel) |
-| `vm_knife.png` | `KNIFE_SPRITE` | 72×96 | Seeded from the repo's prior procedural art (knife viewmodel) |
-| `flash_1.png`, `flash_2.png` | `FLASH_FRAME_1`, `FLASH_FRAME_2` | 24×24 | Seeded from the repo's prior procedural art (muzzle flash, 2 frames) |
+| `pickup_shotgun.png` | `weaponShotgunFrame` | 32×32 | Original to this repo (weapon-viewmodel-art-pass: shotgun pickup redrawn to match the viewmodel) |
+| `vm_pistol_idle.png`, `vm_pistol_fire.png` | `VM_PISTOL_IDLE`, `VM_PISTOL_FIRE` | 96×104 | Original to this repo (weapon-viewmodel-art-pass: pistol viewmodel, idle + slide-back) |
+| `vm_shotgun_idle.png`, `vm_shotgun_fire.png`, `vm_shotgun_pump.png` | `VM_SHOTGUN_IDLE`, `VM_SHOTGUN_FIRE`, `VM_SHOTGUN_PUMP` | 96×104 | Original to this repo (weapon-viewmodel-art-pass: shotgun viewmodel, idle + recoil + pump) |
+| `vm_knife_idle.png`, `vm_knife_slash.png` | `VM_KNIFE_IDLE`, `VM_KNIFE_SLASH` | 96×104 | Original to this repo (weapon-viewmodel-art-pass: knife viewmodel, idle + slash) |
+| `flash_pistol_1.png`, `flash_pistol_2.png` | `FLASH_PISTOL_1`, `FLASH_PISTOL_2` | 24×24 | Original to this repo (weapon-viewmodel-art-pass: pistol muzzle flash, 2 frames) |
+| `flash_shotgun_1.png`, `flash_shotgun_2.png` | `FLASH_SHOTGUN_1`, `FLASH_SHOTGUN_2` | 40×40 | Original to this repo (weapon-viewmodel-art-pass: shotgun muzzle flash, 2 frames) |
 
 ## Replacing the seeded art
 
