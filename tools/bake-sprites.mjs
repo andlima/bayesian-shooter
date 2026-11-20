@@ -80,10 +80,14 @@ const PREVIEW_DEFAULT_SCALE = 4;
 // Bindings are consumed by SPRITES / WEAPONS / drawGunViewmodel unchanged.
 // ---------------------------------------------------------------------------
 export const MANIFEST = [
-  { file: 'imp_1.png',          binding: 'impFrame1',          w: 32, h: 32 },
-  { file: 'imp_2.png',          binding: 'impFrame2',          w: 32, h: 32 },
-  { file: 'grunt_1.png',        binding: 'gruntFrame1',        w: 32, h: 32 },
-  { file: 'grunt_2.png',        binding: 'gruntFrame2',        w: 32, h: 32 },
+  { file: 'imp_walk_1.png',     binding: 'impWalk1',           w: 32, h: 32 },
+  { file: 'imp_walk_2.png',     binding: 'impWalk2',           w: 32, h: 32 },
+  { file: 'imp_wind.png',       binding: 'impWind',            w: 32, h: 32 },
+  { file: 'imp_fire.png',       binding: 'impFire',            w: 32, h: 32 },
+  { file: 'grunt_walk_1.png',   binding: 'gruntWalk1',         w: 32, h: 32 },
+  { file: 'grunt_walk_2.png',   binding: 'gruntWalk2',         w: 32, h: 32 },
+  { file: 'grunt_wind.png',     binding: 'gruntWind',          w: 32, h: 32 },
+  { file: 'grunt_fire.png',     binding: 'gruntFire',          w: 32, h: 32 },
   { file: 'exit_1.png',         binding: 'exitFrame1',         w: 32, h: 32 },
   { file: 'exit_2.png',         binding: 'exitFrame2',         w: 32, h: 32 },
   { file: 'proj_imp_1.png',     binding: 'impProjFrame1',      w: 32, h: 32 },
