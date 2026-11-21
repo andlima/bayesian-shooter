@@ -266,6 +266,14 @@
   // level-exit-progression: "LEVEL N" banner timing. Both fields are in nowMs.
   let levelBannerAtMs = 0;
   let levelBannerUntilMs = 0;
+  // hud-visual-cohesion: single toast slot (newest wins, no queue). Replaces
+  // the old lighting / theme label timers and also announces weapon switches
+  // (`weapon: true` doubles as the strip token-flash timestamp). Not cleared
+  // by clearTransientFeedback — it simply expires.
+  let toast = null;            // { text, atMs, untilMs, weapon, w } | null
+  function showToast(text, durMs, isWeapon) {
+    toast = { text, atMs: nowMs, untilMs: nowMs + durMs, weapon: !!isWeapon, w: 0 };
+  }
 
   // gun-viewmodel: bob accumulator + smoothed bob intensity. bobPhase advances
   // while moving and eases toward the nearest multiple of π when idle so the
@@ -475,12 +483,13 @@
       // atmosphere-lighting: visual debug toggle. Surfaces a small text
       // indicator for ~2 s; otherwise no HUD presence.
       lightingEnabled = !lightingEnabled;
-      lightingToggledAtMs = nowMs;
+      showToast('lighting: ' + (lightingEnabled ? 'on' : 'off'), 2000);
     } else if (e.code === 'KeyT') {
       // theme-runtime-selector: cycle natural → crypt → … → sanctum → natural.
       // Purely cosmetic, so it is NOT gated on player.hp (works while dead).
       forcedThemeIdx = (forcedThemeIdx + 2) % (THEMES.length + 1) - 1;
-      themeToggledAtMs = nowMs;
+      showToast('theme: ' +
+        (forcedThemeIdx < 0 ? 'natural' : THEMES[forcedThemeIdx]), 2000);
     } else if (e.code === 'Digit1') {
       // shotgun-weapon-pickup / knife-melee-weapon: weapon select.
       // Edge-triggered (the wasDown guard above drops auto-repeat) and
@@ -597,7 +606,7 @@
           regenerateDungeon();
         } else if (util === 'L') {
           lightingEnabled = !lightingEnabled;
-          lightingToggledAtMs = nowMs;
+          showToast('lighting: ' + (lightingEnabled ? 'on' : 'off'), 2000);
         } else if (util === 'M') {
           muted = !muted;
           if (audioCtx && masterGain) {
@@ -1823,7 +1832,6 @@
   // Toggle (L) flips between full atmosphere and the legacy flat-shade path.
   // Default ON; a 2 s debug overlay shows after each toggle.
   let lightingEnabled = true;
-  let lightingToggledAtMs = -Infinity;
 
   // theme-runtime-selector: render-only theme override. -1 = natural per-room
   // BFS mix (THEME_MAP, the default); 0..THEMES.length-1 = force the whole
@@ -1832,7 +1840,6 @@
   // collision / AI reads it, and T never mutates MAP/THEME_MAP. Session-only;
   // resets to -1 on page load, persists across N/R/level-exit by design.
   let forcedThemeIdx = -1;
-  let themeToggledAtMs = -Infinity;
 
   // ---------------------------------------------------------------------------
   // Sprite assets — PNG-sourced (assets/sprites/), baked into the sentinel
@@ -2780,6 +2787,9 @@
     // clock (the redundant-key no-op above returns before reaching here), so
     // the new weapon never inherits the old one's fire frame.
     fireAnimStartMs = -Infinity;
+    // hud-visual-cohesion: announce the switch; the same slot drives the
+    // strip token flash. resetRun's direct `weapon = 'pistol'` never toasts.
+    showToast(WEAPONS[id].name, 900, true);
   }
   function cycleWeapon() {
     const order = hasShotgun
@@ -3201,17 +3211,17 @@
 
     drawEnemyMuzzleFlashes();
 
-    // Crosshair: 3-pixel cross in the middle. Tints red briefly after a hit.
-    // 1-px black outline (drawn first, beneath) keeps the crosshair legible
-    // against bright walls on both desktop and touch.
-    const crossColor = (nowMs < hitTintUntil) ? '#f44' : '#fff';
+    // hud-visual-cohesion: gapped crosshair — four 3-px arms, 2-px gap from
+    // the (unfilled) centre pixel, 11 px across. Tints red briefly after a
+    // hit. 1-px dark outline drawn first keeps it legible on bright walls.
+    const crossColor = (nowMs < hitTintUntil) ? HUD_STYLE.crossHit : HUD_STYLE.cross;
     const cx = W >> 1, cy = H >> 1;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(cx - 2, cy - 1, 5, 3);
-    ctx.fillRect(cx - 1, cy - 2, 3, 5);
+    ctx.fillStyle = HUD_STYLE.shadow;
+    ctx.fillRect(cx - 6, cy - 1, 5, 3); ctx.fillRect(cx + 2, cy - 1, 5, 3);
+    ctx.fillRect(cx - 1, cy - 6, 3, 5); ctx.fillRect(cx - 1, cy + 2, 3, 5);
     ctx.fillStyle = crossColor;
-    ctx.fillRect(cx - 1, cy, 3, 1);
-    ctx.fillRect(cx, cy - 1, 1, 3);
+    ctx.fillRect(cx - 5, cy, 3, 1); ctx.fillRect(cx + 3, cy, 3, 1);
+    ctx.fillRect(cx, cy - 5, 1, 3); ctx.fillRect(cx, cy + 3, 1, 3);
 
     drawMuzzleScreenWash(nowMs);
 
@@ -3222,37 +3232,47 @@
     drawPickupPops();
 
     drawMinimap();
+    // hud-visual-cohesion: 1-px frame just outside the minimap rect
+    // (7,7,98,98) so the rect, its contents and every hit-test stay put.
+    ctx.strokeStyle = HUD_STYLE.border;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(MM_X - 0.5, MM_Y - 0.5, MM_SIZE + 1, MM_SIZE + 1);
 
-    // FPS counter overlay.
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(2, 2, 64, 16);
-    ctx.fillStyle = '#fff';
-    ctx.font = '12px monospace';
+    // FPS readout, top-right, 10-px font on a 14-px panel.
+    ctx.fillStyle = HUD_STYLE.panel;
+    ctx.fillRect(W - 52, 2, 50, 14);
+    ctx.fillStyle = HUD_STYLE.value;
+    ctx.font = '10px monospace';
     ctx.textBaseline = 'top';
+    ctx.textAlign = 'right';
+    ctx.fillText(fps.toFixed(0) + ' fps', W - 4, 4);
     ctx.textAlign = 'left';
-    ctx.fillText(fps.toFixed(0) + ' fps', 6, 4);
 
-    // atmosphere-lighting: brief debug overlay after each L toggle.
-    if (nowMs - lightingToggledAtMs < 2000) {
-      const a = 1 - (nowMs - lightingToggledAtMs) / 2000;
-      const text = 'lighting: ' + (lightingEnabled ? 'on' : 'off');
-      ctx.fillStyle = `rgba(0,0,0,${(a * 0.55).toFixed(3)})`;
-      ctx.fillRect(2, 20, 96, 16);
-      ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
-      ctx.fillText(text, 6, 22);
-    }
-
-    // theme-runtime-selector: brief overlay after each T toggle, one row below
-    // the lighting label so the two coexist without overlapping. Same font/
-    // baseline/colors and alpha ramp; no HUD presence after the 2 s window.
-    if (nowMs - themeToggledAtMs < 2000) {
-      const a = 1 - (nowMs - themeToggledAtMs) / 2000;
-      const text = 'theme: ' +
-        (forcedThemeIdx < 0 ? 'natural' : THEMES[forcedThemeIdx]);
-      ctx.fillStyle = `rgba(0,0,0,${(a * 0.55).toFixed(3)})`;
-      ctx.fillRect(2, 38, 96, 16);
-      ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
-      ctx.fillText(text, 6, 40);
+    // Toast slot: top-centre at y = 6, between the minimap frame and the FPS
+    // box (panel capped at W - 2 * (MM_X + MM_SIZE + 8)), linear fade.
+    if (toast && nowMs < toast.untilMs) {
+      const a = 1 - (nowMs - toast.atMs) / (toast.untilMs - toast.atMs);
+      ctx.font = '12px monospace';
+      if (!toast.w) {
+        // One measureText per toast, cached on the slot.
+        toast.w = Math.min(W - 2 * (MM_X + MM_SIZE + 8),
+                           Math.ceil(ctx.measureText(toast.text).width) + 12);
+      }
+      const px = (W - toast.w) >> 1;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = HUD_STYLE.panel;
+      ctx.fillRect(px, 6, toast.w, 16);
+      ctx.strokeStyle = HUD_STYLE.border;
+      ctx.strokeRect(px + 0.5, 6.5, toast.w - 1, 15);
+      ctx.fillStyle = HUD_STYLE.value;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(toast.text, W >> 1, 14);
+      ctx.globalAlpha = 1;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+    } else if (toast) {
+      toast = null;
     }
 
     drawHUD();
@@ -3270,29 +3290,16 @@
         ? 1
         : Math.max(0, 1 - (elapsed - fadeStart) / 400);
       const stripY = (H * 0.32) | 0;
-      ctx.fillStyle = `rgba(0,0,0,${(a * 0.55).toFixed(3)})`;
-      ctx.fillRect(0, stripY, W, 28);
-      ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
-      ctx.font = '18px monospace';
-      ctx.textBaseline = 'middle';
-      ctx.textAlign = 'center';
-      ctx.fillText('LEVEL ' + level, W >> 1, stripY + 14);
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
+      drawBanner('LEVEL ' + level, stripY + 14,
+        { font: '18px monospace', color: HUD_STYLE.value, alpha: a, h: 28 });
     }
 
     if (player.hp <= 0) {
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(0, (H >> 1) - 14, W, 28);
-      ctx.fillStyle = '#f55';
-      ctx.font = '12px monospace';
-      ctx.textBaseline = 'top';
-      ctx.textAlign = 'center';
       const deathText = isTouchDevice
         ? 'YOU DIED — tap RESET to restart'
         : 'YOU DIED — press R to restart';
-      ctx.fillText(deathText, W >> 1, (H >> 1) - 6);
-      ctx.textAlign = 'left';
+      drawBanner(deathText, H >> 1,
+        { font: '12px monospace', color: HUD_STYLE.warn, alpha: 1, h: 28 });
     }
 
     // mobile-touch-controls: touch HUD overlays (joystick / fire / util
@@ -3533,71 +3540,131 @@
     ctx.restore();
   }
 
+  // hud-visual-cohesion: the one HUD palette. Every colour painted by drawHUD,
+  // the toast, the FPS box, the minimap frame, drawBanner and the crosshair
+  // comes from here (or from an existing named constant).
+  const HUD_STYLE = {
+    panel:    'rgba(0,0,0,0.6)',
+    border:   'rgba(255,255,255,0.28)',
+    label:    '#8d9aab',   // dim readout labels
+    value:    '#fff',      // bright readout values
+    accent:   '#7fd3ff',   // weapon token (unchanged)
+    warn:     '#f55',      // low ammo / YOU DIED (unchanged)
+    warnDim:  '#a22',      // empty-magazine pulse partner (unchanged)
+    shadow:   '#000',
+    cross:    '#fff',
+    crossHit: '#f44',
+    track:    '#1c1c1c',   // HP bar track
+    hpHigh:   '#4cc94c',   // hp > 60
+    hpMid:    '#e8a92a',   // 31–60
+    hpLow:    '#e22',      // ≤ 30 (same red + threshold as the heartbeat)
+  };
+
+  // Full-width panel band with 1-px border lines top and bottom and centred
+  // text. Shared by the LEVEL N banner and the death overlay.
+  function drawBanner(text, centreY, o) {
+    const y = centreY - (o.h >> 1);
+    ctx.globalAlpha = o.alpha;
+    ctx.fillStyle = HUD_STYLE.panel;
+    ctx.fillRect(0, y, W, o.h);
+    ctx.fillStyle = HUD_STYLE.border;
+    ctx.fillRect(0, y, W, 1);
+    ctx.fillRect(0, y + o.h - 1, W, 1);
+    ctx.fillStyle = o.color;
+    ctx.font = o.font;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.fillText(text, W >> 1, centreY);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+  }
+
+  // Fixed strip slots per tier, measured once from constant widest-value
+  // strings so live values never move a neighbour (and drawHUD does no
+  // per-frame measureText). Rebuilt only when the tier font changes.
+  let hudLayout = null;
+  function buildHudLayout(fontPx) {
+    const wpnPx = (fontPx >= 16) ? 9 : 10;
+    ctx.font = fontPx + 'px monospace';
+    const w = (s) => ctx.measureText(s).width;
+    const L = { fontPx, wpnPx, wpnW: {} };
+    L.hpLabel = 4;
+    L.hpValue = 4 + w('HP ');
+    L.wpn     = Math.ceil(4 + w('HP 100') + 8);
+    L.ammoLabel  = (W * 0.30) | 0;
+    L.ammoValue  = L.ammoLabel + w('AMMO ');
+    L.levelLabel = (W * 0.55) | 0;
+    L.levelValue = L.levelLabel + w('LEVEL ');
+    L.killsLabel = Math.floor(W - 4 - w('KILLS 999'));
+    L.killsValue = L.killsLabel + w('KILLS ');
+    ctx.font = wpnPx + 'px monospace';
+    for (const k in WEAPONS) L.wpnW[WEAPONS[k].name] = Math.ceil(w(WEAPONS[k].name));
+    return L;
+  }
+
   function drawHUD() {
     // mobile-touch-polish: bump strip + font on touch so HP/AMMO/LEVEL/KILLS
-    // are readable at thumb-distance. Desktop branch stays byte-identical.
+    // are readable at thumb-distance.
     // mobile-mc-feel: extra bump for narrow viewports (clientWidth <= 380).
     const HUD_FONT_PX = !isTouchDevice ? 12 : (touchHudTier === 'narrow' ? 16 : 14);
     const HUD_STRIP_H = !isTouchDevice ? 18 : (touchHudTier === 'narrow' ? 26 : 22);
+    if (!hudLayout || hudLayout.fontPx !== HUD_FONT_PX) hudLayout = buildHudLayout(HUD_FONT_PX);
+    const L = hudLayout;
     const textY = H - HUD_STRIP_H + 4;
     const hpFrac = Math.max(0, Math.min(1, player.hp / MAX_HP));
-    // HUD strip background to keep text legible against any wall colour.
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    // Strip panel, then the 4-px HP bar directly above it; fill colour steps
+    // green → amber → red at the heartbeat threshold.
+    ctx.fillStyle = HUD_STYLE.panel;
     ctx.fillRect(0, H - HUD_STRIP_H, W, HUD_STRIP_H);
-    // Thin red HP bar always sits exactly 2 px above the strip.
-    ctx.fillStyle = '#400';
-    ctx.fillRect(0, H - HUD_STRIP_H - 2, W, 2);
-    ctx.fillStyle = '#e22';
-    ctx.fillRect(0, H - HUD_STRIP_H - 2, (W * hpFrac) | 0, 2);
+    ctx.fillStyle = HUD_STYLE.track;
+    ctx.fillRect(0, H - HUD_STRIP_H - 4, W, 4);
+    ctx.fillStyle = player.hp > 60 ? HUD_STYLE.hpHigh
+                  : player.hp > 30 ? HUD_STYLE.hpMid : HUD_STYLE.hpLow;
+    ctx.fillRect(0, H - HUD_STRIP_H - 4, (W * hpFrac) | 0, 4);
 
     ctx.font = HUD_FONT_PX + 'px monospace';
     ctx.textBaseline = 'top';
-    ctx.fillStyle = '#fff';
     ctx.textAlign = 'left';
-    ctx.fillText('HP   ' + (Math.ceil(player.hp) | 0), 4, textY);
+    const label = (s, x) => { ctx.fillStyle = HUD_STYLE.label; ctx.fillText(s, x, textY); };
+    const value = (s, x, c) => { ctx.fillStyle = c || HUD_STYLE.value; ctx.fillText(s, x, textY); };
 
-    // hud-feedback-polish: AMMO turns warning-red at 5 and pulses at 0.
-    let ammoColor = '#fff';
+    label('HP', L.hpLabel);
+    value(String(Math.ceil(player.hp) | 0), L.hpValue);
+
+    // hud-feedback-polish: AMMO value turns warning-red at 5 and pulses at 0
+    // (~3 Hz: 167 ms ≈ 1/(2*3 Hz)). Colour rules apply to the value only.
+    let ammoColor = HUD_STYLE.value;
     if (ammo === 0) {
-      // ~3 Hz pulse between two reds: 167 ms ≈ 1/(2*3 Hz).
-      ammoColor = (Math.floor(nowMs / 167) % 2 === 0) ? '#f55' : '#a22';
+      ammoColor = (Math.floor(nowMs / 167) % 2 === 0) ? HUD_STYLE.warn : HUD_STYLE.warnDim;
     } else if (ammo <= 5) {
-      ammoColor = '#f55';
+      ammoColor = HUD_STYLE.warn;
     }
-    ctx.fillStyle = ammoColor;
-    ctx.textAlign = 'center';
-    ctx.fillText('AMMO  ' + ammo + ' / ' + MAX_AMMO, (W * 0.40) | 0, textY);
+    label('AMMO', L.ammoLabel);
+    value(ammo + '/' + MAX_AMMO, L.ammoValue, ammoColor);
 
-    // shotgun-weapon-pickup: compact active-weapon name, a separate token in
-    // the gap between the HP and AMMO readouts (the HP / AMMO / LEVEL / KILLS
-    // strings themselves are unchanged). Drawn at a small fixed font so it
-    // never overflows the strip on the desktop / medium / narrow tiers; its
-    // left edge is anchored just right of the *measured* HP text so it can't
-    // collide with HP, and the small font keeps it clear of AMMO. The rect is
-    // cached for the touch weapon-switch hit-test (same edge-tap precedence as
-    // the util buttons, AC #17).
-    const WPN_FONT_PX = (HUD_FONT_PX >= 16) ? 9 : 10;
-    const hpW = ctx.measureText('HP   ' + (Math.ceil(player.hp) | 0)).width;
-    ctx.font = WPN_FONT_PX + 'px monospace';
+    label('LEVEL', L.levelLabel);
+    value(String(level), L.levelValue);
+
+    label('KILLS', L.killsLabel);
+    value(String(stats.kills), L.killsValue);
+
+    // shotgun-weapon-pickup: compact active-weapon token at a fixed per-tier
+    // slot right of the HP readout. Its rect is cached for the touch
+    // weapon-switch hit-test (weaponLabelHit). On an actual switch it renders
+    // bright and eases back to the accent over ~300 ms, timed by the toast.
     const wpnName = WEAPONS[weapon].name;
-    const wpnW = ctx.measureText(wpnName).width;
-    const wpnX = 4 + hpW + 6;
-    const wpnY = textY + ((HUD_FONT_PX - WPN_FONT_PX) >> 1);
-    ctx.fillStyle = '#7fd3ff';
-    ctx.textAlign = 'left';
-    ctx.fillText(wpnName, wpnX, wpnY);
-    weaponHudRect = { x: wpnX, y: H - HUD_STRIP_H, w: wpnW, h: HUD_STRIP_H };
-    ctx.font = HUD_FONT_PX + 'px monospace';
-
-    // level-exit-progression: LEVEL readout sits between AMMO and KILLS.
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.fillText('LEVEL ' + level, (W * 0.65) | 0, textY);
-
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'right';
-    ctx.fillText('KILLS ' + stats.kills, W - 4, textY);
-    ctx.textAlign = 'left';
+    const wpnY = textY + ((HUD_FONT_PX - L.wpnPx) >> 1);
+    ctx.font = L.wpnPx + 'px monospace';
+    ctx.fillStyle = HUD_STYLE.accent;
+    ctx.fillText(wpnName, L.wpn, wpnY);
+    if (toast && toast.weapon && nowMs - toast.atMs < 300) {
+      ctx.globalAlpha = 1 - (nowMs - toast.atMs) / 300;
+      ctx.fillStyle = HUD_STYLE.value;
+      ctx.fillText(wpnName, L.wpn, wpnY);
+      ctx.globalAlpha = 1;
+    }
+    weaponHudRect = { x: L.wpn, y: H - HUD_STRIP_H, w: L.wpnW[wpnName], h: HUD_STRIP_H };
   }
 
   // ---------------------------------------------------------------------------
