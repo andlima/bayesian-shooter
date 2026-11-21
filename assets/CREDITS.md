@@ -14,10 +14,11 @@ shotgun pickup for `weapon-viewmodel-art-pass`, both via the
 `--dump` / `--encode` text workflow, the redrawn shotgun viewmodel plus
 the mitten-glove frames for `viewmodel-hand-styles` (composed procedurally
 from the same ramps with a scratch script that imports the bake module's
-codec; the mitten won the comparison and now carries the base `vm_*` names),
-and the `compact` / `wide` placement redraws for
-`viewmodel-mitten-placement` (same scratch-script workflow over the mitten
-frames). None of it is third-party art; no external attribution is required
+codec), and the compact re-placement of those mitten frames for
+`viewmodel-mitten-placement` (same scratch-script workflow: the weapon body
+translated down with the hand cut to a short wrap; it won the in-play
+comparison and is now the only viewmodel art, under the base `vm_*`
+names). None of it is third-party art; no external attribution is required
 and it is covered by this repository's existing license.
 
 | File | Binding | Size | Source |
@@ -34,17 +35,11 @@ and it is covered by this repository's existing license.
 | `medkit_small.png`, `medkit_large.png` | `medkitSmallFrame`, `medkitLargeFrame` | 32×32 | Original to this repo (`world-sprite-art-pass`): bevelled 3/4-view medkits |
 | `ammo_small.png`, `ammo_large.png` | `ammoSmallFrame`, `ammoLargeFrame` | 32×32 | Original to this repo (`world-sprite-art-pass`): bevelled 3/4-view ammo crates |
 | `pickup_shotgun.png` | `weaponShotgunFrame` | 32×32 | Original to this repo (weapon-viewmodel-art-pass: shotgun pickup redrawn to match the viewmodel) |
-| `vm_pistol_idle.png`, `vm_pistol_fire.png` | `VM_PISTOL_IDLE`, `VM_PISTOL_FIRE` | 96×104 | Original to this repo (viewmodel-hand-styles mitten art, promoted to the base names by viewmodel-mitten-placement: pistol with a fingerless mitten glove, idle + slide-back) |
-| `vm_shotgun_idle.png`, `vm_shotgun_fire.png`, `vm_shotgun_pump.png` | `VM_SHOTGUN_IDLE`, `VM_SHOTGUN_FIRE`, `VM_SHOTGUN_PUMP` | 96×104 | Original to this repo (viewmodel-hand-styles mitten art, promoted to the base names by viewmodel-mitten-placement: foreshortened shotgun with mitten gloves on grip and fore-end, idle + recoil + pump) |
-| `vm_knife_idle.png`, `vm_knife_slash.png` | `VM_KNIFE_IDLE`, `VM_KNIFE_SLASH` | 96×104 | Original to this repo (viewmodel-hand-styles mitten art, promoted to the base names by viewmodel-mitten-placement: knife with a mitten glove, idle + slash) |
+| `vm_pistol_idle.png`, `vm_pistol_fire.png` | `VM_PISTOL_IDLE`, `VM_PISTOL_FIRE` | 96×104 | Original to this repo (viewmodel-mitten-placement compact art, promoted to the base names by viewmodel-adopt-compact: the viewmodel-hand-styles mitten pistol body translated 22 px down with the mitten cut to a short wrap in rows ≥ 66, idle + slide-back) |
+| `vm_shotgun_idle.png`, `vm_shotgun_fire.png`, `vm_shotgun_pump.png` | `VM_SHOTGUN_IDLE`, `VM_SHOTGUN_FIRE`, `VM_SHOTGUN_PUMP` | 96×104 | Original to this repo (viewmodel-mitten-placement compact art, promoted to the base names by viewmodel-adopt-compact: the mitten shotgun body translated 16 px down with the fore-end hand cut to a short wrap in rows ≥ 66, idle + recoil + pump) |
+| `vm_knife_idle.png`, `vm_knife_slash.png` | `VM_KNIFE_IDLE`, `VM_KNIFE_SLASH` | 96×104 | Original to this repo (viewmodel-mitten-placement compact art, promoted to the base names by viewmodel-adopt-compact: the mitten knife body translated 18 px down with the mitten cut to a short wrap in rows ≥ 66, idle + slash) |
 | `flash_pistol_1.png`, `flash_pistol_2.png` | `FLASH_PISTOL_1`, `FLASH_PISTOL_2` | 24×24 | Original to this repo (weapon-viewmodel-art-pass: pistol muzzle flash, 2 frames) |
 | `flash_shotgun_1.png`, `flash_shotgun_2.png` | `FLASH_SHOTGUN_1`, `FLASH_SHOTGUN_2` | 40×40 | Original to this repo (weapon-viewmodel-art-pass: shotgun muzzle flash, 2 frames) |
-| `vm_pistol_idle_compact.png`, `vm_pistol_fire_compact.png` | `VM_PISTOL_IDLE_COMPACT`, `VM_PISTOL_FIRE_COMPACT` | 96×104 | Original to this repo (viewmodel-mitten-placement: base pistol body translated 22 px down, mitten cut to a short wrap in rows ≥ 66) |
-| `vm_shotgun_idle_compact.png`, `vm_shotgun_fire_compact.png`, `vm_shotgun_pump_compact.png` | `VM_SHOTGUN_IDLE_COMPACT`, `VM_SHOTGUN_FIRE_COMPACT`, `VM_SHOTGUN_PUMP_COMPACT` | 96×104 | Original to this repo (viewmodel-mitten-placement: base shotgun body translated 16 px down, fore-end hand cut to a short wrap in rows ≥ 66) |
-| `vm_knife_idle_compact.png`, `vm_knife_slash_compact.png` | `VM_KNIFE_IDLE_COMPACT`, `VM_KNIFE_SLASH_COMPACT` | 96×104 | Original to this repo (viewmodel-mitten-placement: base knife body translated 18 px down, mitten cut to a short wrap in rows ≥ 66) |
-| `vm_pistol_idle_wide.png`, `vm_pistol_fire_wide.png` | `VM_PISTOL_IDLE_WIDE`, `VM_PISTOL_FIRE_WIDE` | 96×104 | Original to this repo (viewmodel-mitten-placement: Doom-style pistol redrawn larger from behind, 42 px slide with ejection port and rear sight; the fire frame pulls the slide back and exposes the barrel) |
-| `vm_shotgun_idle_wide.png`, `vm_shotgun_fire_wide.png`, `vm_shotgun_pump_wide.png` | `VM_SHOTGUN_IDLE_WIDE`, `VM_SHOTGUN_FIRE_WIDE`, `VM_SHOTGUN_PUMP_WIDE` | 96×104 | Original to this repo (viewmodel-mitten-placement: shotgun redrawn with a thicker barrel, broad grooved fore-end and a tall receiver; recoil and pump frames move the fore-end hand) |
-| `vm_knife_idle_wide.png`, `vm_knife_slash_wide.png` | `VM_KNIFE_IDLE_WIDE`, `VM_KNIFE_SLASH_WIDE` | 96×104 | Original to this repo (viewmodel-mitten-placement: broad steel-ramp blade with a wide guard; the slash sweeps the blade across the box) |
 
 ## Replacing the seeded art
 
