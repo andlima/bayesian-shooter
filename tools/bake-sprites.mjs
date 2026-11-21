@@ -110,30 +110,25 @@ export const MANIFEST = [
   { file: 'flash_pistol_2.png',  binding: 'FLASH_PISTOL_2',    w: 24, h: 24 },
   { file: 'flash_shotgun_1.png', binding: 'FLASH_SHOTGUN_1',   w: 40, h: 40 },
   { file: 'flash_shotgun_2.png', binding: 'FLASH_SHOTGUN_2',   w: 40, h: 40 },
-  // viewmodel-hand-styles: alternative hand treatments over the same weapon
-  // bodies (HAND_STYLES[1..3]). Appended after the existing rows so the
+  // viewmodel-mitten-placement: the seven vm_* rows above are the mitten art
+  // (VM_VARIANTS base / low / lower share them). The rows below are the two
+  // redrawn placement variants — compact (same weapon, short hand wrap) and
+  // wide (bigger Doom-style weapon). Appended after the flash rows so the
   // baked-region diff stays minimal.
-  { file: 'vm_pistol_idle_mitten.png',  binding: 'VM_PISTOL_IDLE_MITTEN',  w: 96, h: 104 },
-  { file: 'vm_pistol_fire_mitten.png',  binding: 'VM_PISTOL_FIRE_MITTEN',  w: 96, h: 104 },
-  { file: 'vm_shotgun_idle_mitten.png', binding: 'VM_SHOTGUN_IDLE_MITTEN', w: 96, h: 104 },
-  { file: 'vm_shotgun_fire_mitten.png', binding: 'VM_SHOTGUN_FIRE_MITTEN', w: 96, h: 104 },
-  { file: 'vm_shotgun_pump_mitten.png', binding: 'VM_SHOTGUN_PUMP_MITTEN', w: 96, h: 104 },
-  { file: 'vm_knife_idle_mitten.png',   binding: 'VM_KNIFE_IDLE_MITTEN',   w: 96, h: 104 },
-  { file: 'vm_knife_slash_mitten.png',  binding: 'VM_KNIFE_SLASH_MITTEN',  w: 96, h: 104 },
-  { file: 'vm_pistol_idle_none.png',    binding: 'VM_PISTOL_IDLE_NONE',    w: 96, h: 104 },
-  { file: 'vm_pistol_fire_none.png',    binding: 'VM_PISTOL_FIRE_NONE',    w: 96, h: 104 },
-  { file: 'vm_shotgun_idle_none.png',   binding: 'VM_SHOTGUN_IDLE_NONE',   w: 96, h: 104 },
-  { file: 'vm_shotgun_fire_none.png',   binding: 'VM_SHOTGUN_FIRE_NONE',   w: 96, h: 104 },
-  { file: 'vm_shotgun_pump_none.png',   binding: 'VM_SHOTGUN_PUMP_NONE',   w: 96, h: 104 },
-  { file: 'vm_knife_idle_none.png',     binding: 'VM_KNIFE_IDLE_NONE',     w: 96, h: 104 },
-  { file: 'vm_knife_slash_none.png',    binding: 'VM_KNIFE_SLASH_NONE',    w: 96, h: 104 },
-  { file: 'vm_pistol_idle_shadow.png',  binding: 'VM_PISTOL_IDLE_SHADOW',  w: 96, h: 104 },
-  { file: 'vm_pistol_fire_shadow.png',  binding: 'VM_PISTOL_FIRE_SHADOW',  w: 96, h: 104 },
-  { file: 'vm_shotgun_idle_shadow.png', binding: 'VM_SHOTGUN_IDLE_SHADOW', w: 96, h: 104 },
-  { file: 'vm_shotgun_fire_shadow.png', binding: 'VM_SHOTGUN_FIRE_SHADOW', w: 96, h: 104 },
-  { file: 'vm_shotgun_pump_shadow.png', binding: 'VM_SHOTGUN_PUMP_SHADOW', w: 96, h: 104 },
-  { file: 'vm_knife_idle_shadow.png',   binding: 'VM_KNIFE_IDLE_SHADOW',   w: 96, h: 104 },
-  { file: 'vm_knife_slash_shadow.png',  binding: 'VM_KNIFE_SLASH_SHADOW',  w: 96, h: 104 },
+  { file: 'vm_pistol_idle_compact.png',  binding: 'VM_PISTOL_IDLE_COMPACT',  w: 96, h: 104 },
+  { file: 'vm_pistol_fire_compact.png',  binding: 'VM_PISTOL_FIRE_COMPACT',  w: 96, h: 104 },
+  { file: 'vm_shotgun_idle_compact.png', binding: 'VM_SHOTGUN_IDLE_COMPACT', w: 96, h: 104 },
+  { file: 'vm_shotgun_fire_compact.png', binding: 'VM_SHOTGUN_FIRE_COMPACT', w: 96, h: 104 },
+  { file: 'vm_shotgun_pump_compact.png', binding: 'VM_SHOTGUN_PUMP_COMPACT', w: 96, h: 104 },
+  { file: 'vm_knife_idle_compact.png',   binding: 'VM_KNIFE_IDLE_COMPACT',   w: 96, h: 104 },
+  { file: 'vm_knife_slash_compact.png',  binding: 'VM_KNIFE_SLASH_COMPACT',  w: 96, h: 104 },
+  { file: 'vm_pistol_idle_wide.png',     binding: 'VM_PISTOL_IDLE_WIDE',     w: 96, h: 104 },
+  { file: 'vm_pistol_fire_wide.png',     binding: 'VM_PISTOL_FIRE_WIDE',     w: 96, h: 104 },
+  { file: 'vm_shotgun_idle_wide.png',    binding: 'VM_SHOTGUN_IDLE_WIDE',    w: 96, h: 104 },
+  { file: 'vm_shotgun_fire_wide.png',    binding: 'VM_SHOTGUN_FIRE_WIDE',    w: 96, h: 104 },
+  { file: 'vm_shotgun_pump_wide.png',    binding: 'VM_SHOTGUN_PUMP_WIDE',    w: 96, h: 104 },
+  { file: 'vm_knife_idle_wide.png',      binding: 'VM_KNIFE_IDLE_WIDE',      w: 96, h: 104 },
+  { file: 'vm_knife_slash_wide.png',     binding: 'VM_KNIFE_SLASH_WIDE',     w: 96, h: 104 },
 ];
 
 // ---------------------------------------------------------------------------
