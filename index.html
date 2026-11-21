@@ -481,6 +481,13 @@
       // Purely cosmetic, so it is NOT gated on player.hp (works while dead).
       forcedThemeIdx = (forcedThemeIdx + 2) % (THEMES.length + 1) - 1;
       themeToggledAtMs = nowMs;
+    } else if (e.code === 'KeyH') {
+      // viewmodel-hand-styles: cycle fingered → mitten → none → shadow →
+      // fingered. Cosmetic only (not gated on player.hp, never touches
+      // weapon / fireAnimStartMs / kick state), so a mid-animation press
+      // re-skins the very next frame without restarting the animation.
+      handStyleIdx = (handStyleIdx + 1) % HAND_STYLES.length;
+      handStyleToggledAtMs = nowMs;
     } else if (e.code === 'Digit1') {
       // shotgun-weapon-pickup / knife-melee-weapon: weapon select.
       // Edge-triggered (the wasDown guard above drops auto-repeat) and
@@ -1833,6 +1840,15 @@
   // resets to -1 on page load, persists across N/R/level-exit by design.
   let forcedThemeIdx = -1;
   let themeToggledAtMs = -Infinity;
+
+  // viewmodel-hand-styles: render-only hand-style selector. Index into
+  // HAND_STYLES (defined after WEAPONS); H cycles it exactly like T cycles
+  // themes. Consulted only by drawGunViewmodel's frame pick — nothing in
+  // fireShot / setWeapon / kick / ammo reads or writes it. Session-only;
+  // resets to 0 (today's fingered glove) on page load, persists across
+  // weapon switches, N/R, death and level exit by design.
+  let handStyleIdx = 0;
+  let handStyleToggledAtMs = -Infinity;
 
   // ---------------------------------------------------------------------------
   // Sprite assets — PNG-sourced (assets/sprites/), baked into the sentinel
@@ -3255,6 +3271,18 @@
       ctx.fillText(text, 6, 40);
     }
 
+    // viewmodel-hand-styles: brief overlay after each H press, one row below
+    // the theme label so lighting / theme / hands can all be visible at once.
+    // Same font/baseline/colors and alpha ramp; no HUD presence after 2 s.
+    if (nowMs - handStyleToggledAtMs < 2000) {
+      const a = 1 - (nowMs - handStyleToggledAtMs) / 2000;
+      const text = 'hands: ' + HAND_STYLES[handStyleIdx].name;
+      ctx.fillStyle = `rgba(0,0,0,${(a * 0.55).toFixed(3)})`;
+      ctx.fillRect(2, 56, 96, 16);
+      ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+      ctx.fillText(text, 6, 58);
+    }
+
     drawHUD();
 
     // hud-feedback-polish: damage arrow draws on top of the HUD strip so it
@@ -3983,7 +4011,8 @@
       pellets: 1,
       spreadRad: 0,
       damage: SHOT_DAMAGE,
-      frames: { idle: VM_PISTOL_IDLE, fire: VM_PISTOL_FIRE },
+      // viewmodel-hand-styles: frames live in HAND_STYLES[*].frames.pistol
+      // (one source of truth, selected by handStyleIdx at blit time).
       fireAnim: [{ frame: 'fire', fromMs: 0, toMs: 100 }],
       flash: [FLASH_PISTOL_1, FLASH_PISTOL_2],
       barrelX: BARREL_X,
@@ -4001,7 +4030,7 @@
       pellets: SHOTGUN_PELLETS,
       spreadRad: SHOTGUN_SPREAD_RAD,
       damage: SHOTGUN_PELLET_DAMAGE,
-      frames: { idle: VM_SHOTGUN_IDLE, fire: VM_SHOTGUN_FIRE, pump: VM_SHOTGUN_PUMP },
+      // frames: HAND_STYLES[*].frames.shotgun (idle / fire / pump).
       // recoil frame through the kick, then the pump cycles after the kick
       // has recovered (KICK_UP_MS + KICK_RECOVER_MS = 200 ms) and lands well
       // inside the 650 ms cooldown.
@@ -4030,7 +4059,7 @@
       pellets: 1,
       spreadRad: 0,
       damage: KNIFE_DAMAGE,
-      frames: { idle: VM_KNIFE_IDLE, slash: VM_KNIFE_SLASH },
+      // frames: HAND_STYLES[*].frames.knife (idle / slash).
       fireAnim: [{ frame: 'slash', fromMs: 0, toMs: 140 }],
       flash: null,
       barrelX: BARREL_X,
@@ -4042,6 +4071,69 @@
       muzzleFlash: false,
     },
   };
+
+  // viewmodel-hand-styles: the ONLY source of viewmodel frames. Four hand
+  // treatments over the same weapon bodies, indexed by handStyleIdx (H key).
+  // The index order is the contract for the H cycle and the "hands:" label:
+  //   0 fingered — today's glove (pistol/knife pixels unchanged; shotgun on
+  //                the redrawn foreshortened body)
+  //   1 mitten   — same glove ramp, no finger separation
+  //   2 none     — weapon only, grip running off the bottom edge
+  //   3 shadow   — dark two-tone silhouette tucked behind the weapon
+  // Every style carries every frame key any WEAPONS[*].fireAnim segment
+  // names (idle/fire, idle/fire/pump, idle/slash) so the pick in
+  // drawGunViewmodel can never yield undefined. All frames are GUN_W×GUN_H.
+  const HAND_STYLES = [
+    {
+      name: 'fingered',
+      frames: {
+        pistol:  { idle: VM_PISTOL_IDLE,  fire: VM_PISTOL_FIRE },
+        shotgun: { idle: VM_SHOTGUN_IDLE, fire: VM_SHOTGUN_FIRE, pump: VM_SHOTGUN_PUMP },
+        knife:   { idle: VM_KNIFE_IDLE,   slash: VM_KNIFE_SLASH },
+      },
+    },
+    // TODO(viewmodel-hand-styles): styles 1–3 temporarily alias the style-0
+    // bindings (spec "order of work" step 2). Replace with the
+    // VM_<WEAPON>_<FRAME>_{MITTEN,NONE,SHADOW} bindings once the 21 PNGs are
+    // authored and appended to MANIFEST in tools/bake-sprites.mjs.
+    {
+      name: 'mitten',
+      frames: {
+        pistol:  { idle: VM_PISTOL_IDLE,  fire: VM_PISTOL_FIRE },
+        shotgun: { idle: VM_SHOTGUN_IDLE, fire: VM_SHOTGUN_FIRE, pump: VM_SHOTGUN_PUMP },
+        knife:   { idle: VM_KNIFE_IDLE,   slash: VM_KNIFE_SLASH },
+      },
+    },
+    {
+      name: 'none',
+      frames: {
+        pistol:  { idle: VM_PISTOL_IDLE,  fire: VM_PISTOL_FIRE },
+        shotgun: { idle: VM_SHOTGUN_IDLE, fire: VM_SHOTGUN_FIRE, pump: VM_SHOTGUN_PUMP },
+        knife:   { idle: VM_KNIFE_IDLE,   slash: VM_KNIFE_SLASH },
+      },
+    },
+    {
+      name: 'shadow',
+      frames: {
+        pistol:  { idle: VM_PISTOL_IDLE,  fire: VM_PISTOL_FIRE },
+        shotgun: { idle: VM_SHOTGUN_IDLE, fire: VM_SHOTGUN_FIRE, pump: VM_SHOTGUN_PUMP },
+        knife:   { idle: VM_KNIFE_IDLE,   slash: VM_KNIFE_SLASH },
+      },
+    },
+  ];
+  // Startup self-check: every style must provide every frame key that any
+  // fireAnim segment (plus 'idle') can ask for. Plain throw at module init.
+  for (const style of HAND_STYLES) {
+    for (const wname in WEAPONS) {
+      const need = ['idle'].concat(WEAPONS[wname].fireAnim.map((s) => s.frame));
+      for (const key of need) {
+        const f = style.frames[wname] && style.frames[wname][key];
+        if (!f || f.w !== GUN_W || f.h !== GUN_H) {
+          throw new Error(`HAND_STYLES[${style.name}].frames.${wname}.${key} missing or not ${GUN_W}x${GUN_H}`);
+        }
+      }
+    }
+  }
 
   // Hitscan-weapon's fireShot() calls this on a successful shot ('shot') and
   // on a dry-fire click with empty mag ('dry'). The dry-fire path uses smaller
@@ -4153,7 +4245,9 @@
       const seg = anim[i];
       if (tAnim >= seg.fromMs && tAnim < seg.toMs) { frameKey = seg.frame; break; }
     }
-    const sprite = wpn.frames[frameKey];
+    // viewmodel-hand-styles: two property reads pick the active hand style's
+    // frame for this weapon + segment. Still exactly one GUN_W×GUN_H blit.
+    const sprite = HAND_STYLES[handStyleIdx].frames[weapon][frameKey];
 
     const bobOffX = Math.sin(bobPhase) * 3 * bobIntensity;
     const bobOffY = -Math.abs(Math.sin(bobPhase * 2)) * 2 * bobIntensity;
