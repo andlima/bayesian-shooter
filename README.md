@@ -49,7 +49,14 @@ browser requires a user gesture before mouse-look will activate. Press
 | `L` | Toggle atmosphere lighting |
 | `R` | Reset run (after death) |
 | `M` | Toggle mute |
+| `` ` `` | Open / close key bindings |
 | `Esc` | Release pointer lock |
+
+The movement, turn, fire, weapon-select and cycle keys above are the
+defaults and can be rebound from the key-bindings overlay (press `` ` ``;
+the game pauses while it is open). Each action has a primary and a
+secondary slot. Bindings are saved in the browser's `localStorage`, and
+`R` inside the overlay restores the defaults.
 
 The keyboard arrow keys exist as a fallback for situations where pointer
 lock isn't available or convenient (e.g. before the first click, or when
