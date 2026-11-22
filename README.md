@@ -41,6 +41,10 @@ browser requires a user gesture before mouse-look will activate. Press
 | Mouse | Look (requires pointer lock) |
 | Left-click | Fire (and lock pointer if not locked) |
 | `Space` | Fire (alt to click) |
+| `0` | Knife |
+| `1` | Pistol |
+| `2` | Shotgun (once picked up) |
+| `Q` | Cycle owned weapons |
 | `N` | Regenerate dungeon |
 | `L` | Toggle atmosphere lighting |
 | `R` | Reset run (after death) |
@@ -57,7 +61,8 @@ audio). Use the on-screen joystick in the bottom-left corner to move
 (forward / strafe). **Tap anywhere on the screen to fire**, or **drag
 anywhere on the screen to look around** — both gestures use the same
 finger. Tap the small N / L / M buttons just below the minimap to
-regenerate / toggle lighting / mute. Look rotation slows automatically
+regenerate / toggle lighting / mute. Tap the weapon label in the bottom
+strip to cycle weapons. Look rotation slows automatically
 when your crosshair is near a visible enemy. Pointer lock is not used on
 touch devices.
 
