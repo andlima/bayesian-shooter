@@ -83,7 +83,7 @@
 <div id="touch-joy" aria-hidden="true">
   <div id="touch-joy-thumb"></div>
 </div>
-<div class="hint">Click to lock mouse &middot; WASD to move &middot; Mouse / arrows to look &middot; N to regenerate &middot; Esc to release</div>
+<div class="hint">Click to lock mouse &middot; WASD to move &middot; Mouse / arrows to look &middot; N to regenerate &middot; ` to rebind keys &middot; Esc to release</div>
 <script>
 'use strict';
 (() => {
@@ -401,11 +401,187 @@
   let mouseDx = 0;
   let pointerLocked = false;
 
-  const blockedKeys = new Set([
-    'KeyW', 'KeyA', 'KeyS', 'KeyD',
-    'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
-    'Space', 'KeyN', 'AltLeft', 'AltRight'
-  ]);
+  // key-rebinding-overlay: fixed preventDefault keys; bound codes are
+  // blocked dynamically via codeToAction.
+  const blockedKeys = new Set(['KeyN', 'AltLeft', 'AltRight']);
+
+  // key-rebinding-overlay: action → [primary, secondary] table. ACTIONS is
+  // the source of defaults, labels and row order; RESERVED can never be
+  // bound; codeToAction is rebuilt on every change.
+  const ACTIONS = [
+    ['moveForward',   'Forward',      ['KeyW', 'ArrowUp']],
+    ['moveBack',      'Back',         ['KeyS', 'ArrowDown']],
+    ['strafeLeft',    'Strafe left',  ['KeyA', null]],
+    ['strafeRight',   'Strafe right', ['KeyD', null]],
+    ['turnLeft',      'Turn left',    ['ArrowLeft', null]],
+    ['turnRight',     'Turn right',   ['ArrowRight', null]],
+    ['fire',          'Fire',         ['Space', null]],
+    ['weaponKnife',   'Knife',        ['Digit0', null]],
+    ['weaponPistol',  'Pistol',       ['Digit1', null]],
+    ['weaponShotgun', 'Shotgun',      ['Digit2', null]],
+    ['cycleWeapon',   'Cycle weapon', ['KeyQ', null]],
+  ];
+  const RESERVED = new Set(['KeyN', 'KeyL', 'KeyT', 'KeyM', 'KeyR', 'Escape',
+    'Backquote', 'AltLeft', 'AltRight', 'ShiftLeft', 'ShiftRight',
+    'ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight', 'CapsLock', 'Tab']);
+  const BINDS_KEY = 'bs.keybinds.v1';
+  const binds = Object.create(null);   // action -> [code|null, code|null]
+  const codeToAction = new Map();      // code -> { action, slot }
+  let settingsOpen = false;
+  let settingsRow = 0, settingsSlot = 0, settingsCapture = false;
+
+  function rebuildCodeMap() {
+    codeToAction.clear();
+    for (const [id] of ACTIONS) {
+      for (let s = 0; s < 2; s++) {
+        if (binds[id][s]) codeToAction.set(binds[id][s], { action: id, slot: s });
+      }
+    }
+  }
+  function applyDefaultBinds() {
+    for (const [id, , def] of ACTIONS) binds[id] = [def[0], def[1]];
+    rebuildCodeMap();
+  }
+  function isDown(action) {
+    const b = binds[action];
+    return !!(keys[b[0]] || keys[b[1]]);
+  }
+  function actionFor(code) {
+    const m = codeToAction.get(code);
+    return m ? m.action : null;
+  }
+  function actionLabel(action) {
+    for (const a of ACTIONS) if (a[0] === action) return a[1];
+    return action;
+  }
+  // Validates the whole stored document; null on any failure.
+  function loadBinds() {
+    let raw = null;
+    try { raw = localStorage.getItem(BINDS_KEY); } catch (_) { return null; }
+    if (typeof raw !== 'string') return null;
+    let doc = null;
+    try { doc = JSON.parse(raw); } catch (_) { return null; }
+    if (!doc || typeof doc !== 'object' || doc.v !== 1) return null;
+    const b = doc.binds;
+    if (!b || typeof b !== 'object' || Array.isArray(b)) return null;
+    if (Object.keys(b).length !== ACTIONS.length) return null;
+    const out = Object.create(null);
+    const seen = new Set();
+    for (const [id] of ACTIONS) {
+      if (!Object.prototype.hasOwnProperty.call(b, id)) return null;
+      const pair = b[id];
+      if (!Array.isArray(pair) || pair.length !== 2) return null;
+      for (const c of pair) {
+        if (c === null) continue;
+        if (typeof c !== 'string' || c === '' || RESERVED.has(c) || seen.has(c)) return null;
+        seen.add(c);
+      }
+      if (pair[0] === null && pair[1] === null) return null;
+      out[id] = [pair[0], pair[1]];
+    }
+    return out;
+  }
+  function saveBinds() {
+    const doc = { v: 1, binds: {} };
+    for (const [id] of ACTIONS) doc.binds[id] = [binds[id][0], binds[id][1]];
+    try { localStorage.setItem(BINDS_KEY, JSON.stringify(doc)); } catch (_) {}
+  }
+  applyDefaultBinds();
+  {
+    const stored = loadBinds();
+    if (stored) {
+      for (const id in stored) binds[id] = stored[id];
+      rebuildCodeMap();
+    }
+  }
+
+  // Each mutating path keeps "every action has ≥ 1 key, no code in two
+  // slots" and persists.
+  function assignBind(action, slot, code) {
+    const cur = binds[action];
+    if (cur[slot] === code) return;
+    const other = codeToAction.get(code);
+    if (other) {
+      const ob = binds[other.action];
+      if (other.action !== action && cur[slot] === null && ob[1 - other.slot] === null) {
+        showToast('would unbind ' + actionLabel(other.action), 1500);
+        return;
+      }
+      const prev = cur[slot];
+      cur[slot] = code;
+      ob[other.slot] = prev;
+    } else {
+      cur[slot] = code;
+    }
+    rebuildCodeMap();
+    saveBinds();
+  }
+  function clearBind(action, slot) {
+    const cur = binds[action];
+    if (cur[1 - slot] === null) { showToast('needs one key', 1500); return; }
+    if (cur[slot] === null) return;
+    cur[slot] = null;
+    rebuildCodeMap();
+    saveBinds();
+  }
+  function restoreDefaultBinds() {
+    applyDefaultBinds();
+    saveBinds();
+    showToast('defaults restored', 1500);
+  }
+  function toggleSettings() {
+    settingsOpen = !settingsOpen;
+    settingsCapture = false;
+    if (!settingsOpen) return;
+    if (document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
+    for (const k in keys) keys[k] = false;
+    keys['Backquote'] = true; // keep the edge guard armed for the toggling key
+    mouseDx = 0;
+  }
+  function toggleMute() {
+    muted = !muted;
+    if (audioCtx && masterGain) {
+      masterGain.gain.value = muted ? 0 : MASTER_VOL;
+    }
+  }
+  function handleSettingsKey(e) {
+    const code = e.code;
+    if (settingsCapture) {
+      e.preventDefault();
+      settingsCapture = false;
+      if (code === 'Escape') return;
+      if (RESERVED.has(code)) { showToast('reserved key', 1500); return; }
+      assignBind(ACTIONS[settingsRow][0], settingsSlot, code);
+      return;
+    }
+    switch (code) {
+      case 'KeyM': toggleMute(); break;
+      case 'Escape': toggleSettings(); break;
+      case 'ArrowUp':
+        e.preventDefault();
+        settingsRow = (settingsRow + ACTIONS.length - 1) % ACTIONS.length;
+        break;
+      case 'ArrowDown':
+        e.preventDefault();
+        settingsRow = (settingsRow + 1) % ACTIONS.length;
+        break;
+      case 'ArrowLeft':  e.preventDefault(); settingsSlot = 0; break;
+      case 'ArrowRight': e.preventDefault(); settingsSlot = 1; break;
+      case 'Enter':      e.preventDefault(); settingsCapture = true; break;
+      case 'Backspace':
+        e.preventDefault();
+        clearBind(ACTIONS[settingsRow][0], settingsSlot);
+        break;
+      case 'KeyR': restoreDefaultBinds(); break;
+    }
+  }
+  const ARROW_GLYPH = { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' };
+  function keyLabel(code) {
+    if (code === null) return '–';
+    if (code.startsWith('Digit')) return code.slice(5);
+    if (code.startsWith('Key')) return code.slice(3);
+    return ARROW_GLYPH[code] || code;
+  }
 
   // mobile-touch-controls: touch input layer. Detection is one-shot at
   // startup so a desktop user with no touch input never sees the HUD even
@@ -464,10 +640,29 @@
     ensureAudio();
     const wasDown = !!keys[e.code];
     keys[e.code] = true;
-    if (blockedKeys.has(e.code)) e.preventDefault();
+    if (blockedKeys.has(e.code) || codeToAction.has(e.code)) e.preventDefault();
     if (wasDown) return; // ignore auto-repeat for edge-triggered actions
-    if (e.code === 'Space') {
-      fireShot();
+    // key-rebinding-overlay: ` toggles the overlay; while open only its
+    // navigation / capture keys and M (mute) act.
+    if (e.code === 'Backquote') {
+      toggleSettings();
+      return;
+    }
+    if (settingsOpen) {
+      handleSettingsKey(e);
+      return;
+    }
+    const action = actionFor(e.code);
+    if (action !== null) {
+      // Table-driven gameplay keys: edge-triggered, inert while dead;
+      // setWeapon keeps its no-op / toast semantics.
+      switch (action) {
+        case 'fire':          fireShot(); break;
+        case 'weaponKnife':   if (player.hp > 0) setWeapon('knife'); break;
+        case 'weaponPistol':  if (player.hp > 0) setWeapon('pistol'); break;
+        case 'weaponShotgun': if (player.hp > 0) setWeapon('shotgun'); break;
+        case 'cycleWeapon':   if (player.hp > 0) cycleWeapon(); break;
+      }
     } else if (e.code === 'KeyR' && player.hp <= 0) {
       resetRun();
       equipFramesLeft = EQUIP_FRAMES;
@@ -475,10 +670,7 @@
       regenerateDungeon();
     } else if (e.code === 'KeyM') {
       // Mute toggle works even during the death freeze.
-      muted = !muted;
-      if (audioCtx && masterGain) {
-        masterGain.gain.value = muted ? 0 : MASTER_VOL;
-      }
+      toggleMute();
     } else if (e.code === 'KeyL') {
       // atmosphere-lighting: visual debug toggle. Surfaces a small text
       // indicator for ~2 s; otherwise no HUD presence.
@@ -490,23 +682,6 @@
       forcedThemeIdx = (forcedThemeIdx + 2) % (THEMES.length + 1) - 1;
       showToast('theme: ' +
         (forcedThemeIdx < 0 ? 'natural' : THEMES[forcedThemeIdx]), 2000);
-    } else if (e.code === 'Digit0') {
-      // shotgun-weapon-pickup / knife-melee-weapon / renumber-weapon-keys:
-      // weapon select — 0 = knife, 1 = pistol, 2 = shotgun (3 is unbound).
-      // Edge-triggered (the wasDown guard above drops auto-repeat) and
-      // inert during the death freeze, like the other gameplay keys.
-      // Digit0 always selects the knife (always owned, no pickup); Digit2
-      // is a no-op until the shotgun is owned. KeyQ cycles the owned
-      // weapons in that same numbering (knife → pistol → shotgun → knife);
-      // because the knife is always owned it toggles knife ↔ pistol in a
-      // pistol-only run.
-      if (player.hp > 0) setWeapon('knife');
-    } else if (e.code === 'Digit1') {
-      if (player.hp > 0) setWeapon('pistol');
-    } else if (e.code === 'Digit2') {
-      if (player.hp > 0) setWeapon('shotgun');
-    } else if (e.code === 'KeyQ') {
-      if (player.hp > 0) cycleWeapon();
     }
   });
   window.addEventListener('keyup', (e) => {
@@ -518,7 +693,7 @@
   });
 
   canvas.addEventListener('click', () => {
-    if (!isTouchDevice && !pointerLocked) {
+    if (!isTouchDevice && !pointerLocked && !settingsOpen) {
       const p = canvas.requestPointerLock();
       if (p && typeof p.catch === 'function') p.catch(() => {});
     }
@@ -527,7 +702,7 @@
   canvas.addEventListener('mousedown', (e) => {
     ensureAudio();
     if (e.button !== 0) return;
-    if (!pointerLocked) return;
+    if (!pointerLocked || settingsOpen) return;
     e.preventDefault();
     fireShot();
   });
@@ -823,6 +998,8 @@
   }
 
   function update(dt) {
+    // key-rebinding-overlay: pause outright; render() keeps running.
+    if (settingsOpen) return;
     if (player.hp <= 0) {
       // Frozen death state. Drain queued input so it cannot leak post-reset.
       mouseDx = 0;
@@ -856,13 +1033,14 @@
     const rotSpeed  = 2.4;     // radians / second (keyboard)
     const mouseSens = 0.0022;  // radians per pixel of mouse movement
 
-    // Doom-style strafe modifier: hold either Alt to make the arrows
-    // strafe (mirroring A/D) instead of turning the camera.
+    // Doom-style strafe modifier: hold either Alt to make the turn keys
+    // strafe (mirroring strafeLeft / strafeRight) instead of turning.
     const altStrafe = keys['AltLeft'] || keys['AltRight'];
+    const turnL = isDown('turnLeft'), turnR = isDown('turnRight');
 
     let rot = 0;
-    if (keys['ArrowLeft']  && !altStrafe) rot -= rotSpeed * dt;
-    if (keys['ArrowRight'] && !altStrafe) rot += rotSpeed * dt;
+    if (turnL && !altStrafe) rot -= rotSpeed * dt;
+    if (turnR && !altStrafe) rot += rotSpeed * dt;
     if ((pointerLocked || isTouchDevice) && mouseDx !== 0) {
       if (isTouchDevice) mouseDx *= aimAssistScale();
       rot += mouseDx * mouseSens;
@@ -880,10 +1058,10 @@
     }
 
     let mvX = 0, mvY = 0;
-    if (keys['KeyW'] || keys['ArrowUp'])   { mvX += player.dirX;   mvY += player.dirY; }
-    if (keys['KeyS'] || keys['ArrowDown']) { mvX -= player.dirX;   mvY -= player.dirY; }
-    if (keys['KeyA'] || (altStrafe && keys['ArrowLeft']))  { mvX -= player.planeX; mvY -= player.planeY; }
-    if (keys['KeyD'] || (altStrafe && keys['ArrowRight'])) { mvX += player.planeX; mvY += player.planeY; }
+    if (isDown('moveForward')) { mvX += player.dirX;   mvY += player.dirY; }
+    if (isDown('moveBack'))    { mvX -= player.dirX;   mvY -= player.dirY; }
+    if (isDown('strafeLeft')  || (altStrafe && turnL)) { mvX -= player.planeX; mvY -= player.planeY; }
+    if (isDown('strafeRight') || (altStrafe && turnR)) { mvX += player.planeX; mvY += player.planeY; }
     // mobile-touch-controls: joystick output composes into the same move
     // vector as keyboard. jy < 0 (finger above anchor) = forward; jx > 0
     // = strafe right. The normalize below caps magnitude so a hybrid
@@ -3250,32 +3428,8 @@
     ctx.fillText(fps.toFixed(0) + ' fps', W - 4, 4);
     ctx.textAlign = 'left';
 
-    // Toast slot: top-centre at y = 6, between the minimap frame and the FPS
-    // box (panel capped at W - 2 * (MM_X + MM_SIZE + 8)), linear fade.
-    if (toast && nowMs < toast.untilMs) {
-      const a = 1 - (nowMs - toast.atMs) / (toast.untilMs - toast.atMs);
-      ctx.font = '12px monospace';
-      if (!toast.w) {
-        // One measureText per toast, cached on the slot.
-        toast.w = Math.min(W - 2 * (MM_X + MM_SIZE + 8),
-                           Math.ceil(ctx.measureText(toast.text).width) + 12);
-      }
-      const px = (W - toast.w) >> 1;
-      ctx.globalAlpha = a;
-      ctx.fillStyle = HUD_STYLE.panel;
-      ctx.fillRect(px, 6, toast.w, 16);
-      ctx.strokeStyle = HUD_STYLE.border;
-      ctx.strokeRect(px + 0.5, 6.5, toast.w - 1, 15);
-      ctx.fillStyle = HUD_STYLE.value;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(toast.text, W >> 1, 14);
-      ctx.globalAlpha = 1;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-    } else if (toast) {
-      toast = null;
-    }
+    // key-rebinding-overlay: while open, drawSettingsOverlay draws the toast.
+    if (!settingsOpen) drawToast();
 
     drawHUD();
 
@@ -3332,6 +3486,90 @@
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
     }
+
+    // key-rebinding-overlay: modal settings panel, above everything.
+    if (settingsOpen) drawSettingsOverlay();
+  }
+
+  // Toast slot: top-centre at y = 6, between the minimap frame and the FPS
+  // box (panel capped at W - 2 * (MM_X + MM_SIZE + 8)), linear fade.
+  function drawToast() {
+    if (toast && nowMs < toast.untilMs) {
+      const a = 1 - (nowMs - toast.atMs) / (toast.untilMs - toast.atMs);
+      ctx.font = '12px monospace';
+      if (!toast.w) {
+        // One measureText per toast, cached on the slot.
+        toast.w = Math.min(W - 2 * (MM_X + MM_SIZE + 8),
+                           Math.ceil(ctx.measureText(toast.text).width) + 12);
+      }
+      const px = (W - toast.w) >> 1;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = HUD_STYLE.panel;
+      ctx.fillRect(px, 6, toast.w, 16);
+      ctx.strokeStyle = HUD_STYLE.border;
+      ctx.strokeRect(px + 0.5, 6.5, toast.w - 1, 15);
+      ctx.fillStyle = HUD_STYLE.value;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(toast.text, W >> 1, 14);
+      ctx.globalAlpha = 1;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+    } else if (toast) {
+      toast = null;
+    }
+  }
+
+  // key-rebinding-overlay: canvas modal. Toast slot stays at y 6–22, title
+  // band 23–45, panel 48–250 (eleven 15-px rows + two-line footer) ends
+  // above the HUD strip.
+  function drawSettingsOverlay() {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, W, H);
+    drawBanner('KEY BINDINGS', 34,
+      { font: '12px monospace', color: HUD_STYLE.value, alpha: 1, h: 22 });
+    const PX = 48, PY = 48, PW = W - 2 * PX, PH = 202;
+    ctx.fillStyle = HUD_STYLE.panel;
+    ctx.strokeStyle = HUD_STYLE.border;
+    ctx.lineWidth = 1;
+    roundRect(PX + 0.5, PY + 0.5, PW - 1, PH - 1, BTN_R);
+    ctx.fill();
+    ctx.stroke();
+    ctx.font = '12px monospace';
+    ctx.textBaseline = 'middle';
+    const ROW_H = 15, ROW0 = PY + 4, CELL_W = 84, CELL_H = 13;
+    const cellX = [PX + PW - 2 * CELL_W - 20, PX + PW - CELL_W - 10];
+    for (let r = 0; r < ACTIONS.length; r++) {
+      const [id, label] = ACTIONS[r];
+      const cy = ROW0 + r * ROW_H + (ROW_H >> 1);
+      const rowSel = (r === settingsRow);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = rowSel ? HUD_STYLE.value : HUD_STYLE.label;
+      ctx.fillText(label, PX + 12, cy);
+      for (let s = 0; s < 2; s++) {
+        const sel = rowSel && s === settingsSlot;
+        const cx = cellX[s];
+        ctx.fillStyle = sel ? 'rgba(127,211,255,0.18)' : HUD_STYLE.track;
+        ctx.fillRect(cx, cy - (CELL_H >> 1), CELL_W, CELL_H);
+        ctx.strokeStyle = sel ? HUD_STYLE.accent : HUD_STYLE.border;
+        ctx.strokeRect(cx + 0.5, cy - (CELL_H >> 1) + 0.5, CELL_W - 1, CELL_H - 1);
+        ctx.textAlign = 'center';
+        if (sel && settingsCapture) {
+          ctx.fillStyle = HUD_STYLE.warn;
+          ctx.fillText('press key…', cx + (CELL_W >> 1), cy);
+        } else {
+          ctx.fillStyle = sel ? HUD_STYLE.accent : HUD_STYLE.value;
+          ctx.fillText(keyLabel(binds[id][s]), cx + (CELL_W >> 1), cy);
+        }
+      }
+    }
+    ctx.textAlign = 'center';
+    ctx.fillStyle = HUD_STYLE.label;
+    ctx.fillText('↑↓ row · ←→ slot · Enter rebind', W >> 1, PY + PH - 22);
+    ctx.fillText('Backspace clear · R defaults · ` close', W >> 1, PY + PH - 9);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    drawToast();
   }
 
   // ---------------------------------------------------------------------------
