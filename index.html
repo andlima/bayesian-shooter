@@ -490,19 +490,21 @@
       forcedThemeIdx = (forcedThemeIdx + 2) % (THEMES.length + 1) - 1;
       showToast('theme: ' +
         (forcedThemeIdx < 0 ? 'natural' : THEMES[forcedThemeIdx]), 2000);
-    } else if (e.code === 'Digit1') {
-      // shotgun-weapon-pickup / knife-melee-weapon: weapon select.
+    } else if (e.code === 'Digit0') {
+      // shotgun-weapon-pickup / knife-melee-weapon / renumber-weapon-keys:
+      // weapon select — 0 = knife, 1 = pistol, 2 = shotgun (3 is unbound).
       // Edge-triggered (the wasDown guard above drops auto-repeat) and
       // inert during the death freeze, like the other gameplay keys.
-      // Digit2 is a no-op until the shotgun is owned; Digit3 always
-      // selects the knife (always owned, no pickup). KeyQ cycles the
-      // owned weapons — because the knife is always owned it now toggles
-      // pistol ↔ knife in a pistol-only run (no longer a no-op).
+      // Digit0 always selects the knife (always owned, no pickup); Digit2
+      // is a no-op until the shotgun is owned. KeyQ cycles the owned
+      // weapons in that same numbering (knife → pistol → shotgun → knife);
+      // because the knife is always owned it toggles knife ↔ pistol in a
+      // pistol-only run.
+      if (player.hp > 0) setWeapon('knife');
+    } else if (e.code === 'Digit1') {
       if (player.hp > 0) setWeapon('pistol');
     } else if (e.code === 'Digit2') {
       if (player.hp > 0) setWeapon('shotgun');
-    } else if (e.code === 'Digit3') {
-      if (player.hp > 0) setWeapon('knife');
     } else if (e.code === 'KeyQ') {
       if (player.hp > 0) cycleWeapon();
     }
@@ -618,7 +620,7 @@
       // shotgun-weapon-pickup / knife-melee-weapon: weapon-label tap. Same
       // edge-tap precedence as the util buttons (checked before the tap-or-look
       // slot and consumed), so a tap there cycles through the same owned-weapon
-      // order as Q — pistol → shotgun (if owned) → knife → pistol — and never
+      // order as Q — knife → pistol → shotgun (if owned) → knife — and never
       // also fires. Because the knife is always owned the tap always changes
       // the weapon now; the tap is still always consumed (it must not fall
       // through and fire).
@@ -2771,12 +2773,12 @@
 
   // shotgun-weapon-pickup / knife-melee-weapon: weapon selection. setWeapon
   // re-arms the existing equip slide-in only on an actual change (a redundant
-  // Digit1/Digit3 while already on that weapon is a no-op, so it never
+  // Digit0/Digit1 while already on that weapon is a no-op, so it never
   // re-pops). The shotgun cannot be selected while it is not owned; the knife
   // is always owned (no pickup, no flag) so it is accepted unconditionally.
-  // cycleWeapon walks an explicit, stable owned-weapon order — pistol →
-  // shotgun (if owned) → knife → pistol — so it is no longer a no-op with the
-  // pistol only: it toggles pistol ↔ knife.
+  // cycleWeapon walks an explicit, stable owned-weapon order that follows the
+  // key numbering — knife (0) → pistol (1) → shotgun (2, if owned) → knife —
+  // so it is never a no-op: with the pistol only it toggles knife ↔ pistol.
   function setWeapon(id) {
     if (id === weapon) return;
     if (id === 'shotgun' && !hasShotgun) return;
@@ -2793,8 +2795,8 @@
   }
   function cycleWeapon() {
     const order = hasShotgun
-      ? ['pistol', 'shotgun', 'knife']
-      : ['pistol', 'knife'];
+      ? ['knife', 'pistol', 'shotgun']
+      : ['knife', 'pistol'];
     const i = order.indexOf(weapon);
     setWeapon(order[(i + 1) % order.length]);
   }
