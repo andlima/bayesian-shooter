@@ -127,6 +127,11 @@
   const PICKUP_LARGE_CHANCE   = 0.2;   // 20% large, 80% small
   const PICKUP_MAX_PER_ROOM   = 2;     // 0..2 inclusive per non-starting room
   const MAX_PICKUPS           = 18;    // hard cap per dungeon
+  // level-difficulty-ramp: linear enemy-pressure ramp from level 1 to a
+  // plateau. Only count and imp/grunt mix scale; TYPE_TABLE is untouched.
+  const LEVEL_RAMP_PLATEAU    = 6;     // level at which the ramp stops growing
+  const LEVEL_RAMP_MAX_EXTRA  = 2;     // extra enemies per room at the plateau
+  const LEVEL_RAMP_GRUNT_SWING = 0.3;  // grunt chance rises 0.5 -> 0.8
   const PICKUP_POP_MS         = 600;   // worldspace text duration
   const PICKUP_POP_MAX        = 8;     // FIFO cap
   const CONTACT_RADIUS = 0.6;
@@ -2242,7 +2247,9 @@
     // shotgun pickup is back in place.
     weapon = 'pistol';
     hasShotgun = false;
-    level = 1;
+    // level-difficulty-ramp: R does not regenerate, so restore the level the
+    // current dungeon was actually generated for (?level=N), not 1.
+    level = START_LEVEL;
     lastFireTime = -Infinity;
     clearTransientFeedback();
   }
@@ -2275,12 +2282,37 @@
     }
   }
 
+  // level-difficulty-ramp: ?level=N starts a run at level N (1..999) so a
+  // tester can inspect the ramp directly. Read once at startup; it does not
+  // pin later levels. Anything that is not a base-10 integer in range is
+  // silently ignored so a typo can never feed NaN into the ramp math.
+  function parseLevelFromUrl() {
+    try {
+      const sp = new URL(window.location.href).searchParams.get('level');
+      if (sp == null || sp === '') return null;
+      if (!/^\d+$/.test(sp)) return null;
+      const n = Number.parseInt(sp, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 999) return null;
+      return n;
+    } catch (_) {
+      return null;
+    }
+  }
+  const START_LEVEL = (() => { const n = parseLevelFromUrl(); return n != null ? n : 1; })();
+
   function pickRandomSeed() {
     return Math.floor(Math.random() * 0x100000000) >>> 0;
   }
 
-  function generateDungeon(seed) {
+  function generateDungeon(seed, lvl = 1) {
     const rand = mulberry32(seed);
+    // level-difficulty-ramp: pressure scales linearly from level 1 to the
+    // plateau. None of these touch rand(), so the level-1 output (t = 0) is
+    // byte-identical to the pre-ramp generator for every seed.
+    const t = Math.min(1, Math.max(0, (lvl - 1) / (LEVEL_RAMP_PLATEAU - 1)));
+    const extraPerRoom = Math.round(LEVEL_RAMP_MAX_EXTRA * t);   // 0 at lvl 1
+    const gruntChance = 0.5 + LEVEL_RAMP_GRUNT_SWING * t;        // 0.5 at lvl 1
+    const maxEnemies = 36 + 6 * extraPerRoom;                    // 36 at lvl 1
     // 48x48 grid, in the spec's required 40-60 range.
     const W = 48, H = 48;
     const TARGET_MIN = 6, TARGET_MAX = 12;
@@ -2476,11 +2508,13 @@
         }
       }
 
-      // Enemy spawns: 1-3 per non-starting room at distinct interior floor
-      // cells, capped at MAX_ENEMIES total. Type chosen per-spawn from the
-      // existing TYPE_TABLE (imp / grunt only).
+      // Enemy spawns: 1-3 (+ extraPerRoom) per non-starting room at distinct
+      // interior floor cells, capped at MAX_ENEMIES total. Type chosen
+      // per-spawn from the existing TYPE_TABLE (imp / grunt only). The
+      // level ramp only shifts the additive bonus, the type threshold and
+      // the cap; the rand() call sequence is unchanged.
       const newSpawns = [];
-      const MAX_ENEMIES = 36;
+      const MAX_ENEMIES = maxEnemies;
       for (let i = 0; i < rooms.length && newSpawns.length < MAX_ENEMIES; i++) {
         if (i === startIdx) continue;
         const room = rooms[i];
@@ -2495,14 +2529,16 @@
           const j = Math.floor(rand() * (s + 1));
           const tmp = cells[s]; cells[s] = cells[j]; cells[j] = tmp;
         }
-        const want = 1 + Math.floor(rand() * 3); // 1..3 inclusive
+        const want = 1 + Math.floor(rand() * 3) + extraPerRoom; // 1..3 at lvl 1
         const count = Math.min(want, cells.length);
         for (let k = 0; k < count && newSpawns.length < MAX_ENEMIES; k++) {
           const cell = cells[k];
           newSpawns.push({
             x: cell.x + 0.5,
             y: cell.y + 0.5,
-            type: rand() < 0.5 ? 'imp' : 'grunt',
+            // Imp stays on the low side of the same single draw; the
+            // threshold is 0.5 at level 1 (identical to the pre-ramp roll).
+            type: rand() < (1 - gruntChance) ? 'imp' : 'grunt',
           });
         }
       }
@@ -2586,7 +2622,7 @@
         });
       }
 
-      return { map, mapW: W, mapH: H, rooms, playerSpawn, enemySpawns: newSpawns, pickupSpawns: newPickupSpawns, exitCell, themeMap, seed };
+      return { map, mapW: W, mapH: H, rooms, playerSpawn, enemySpawns: newSpawns, pickupSpawns: newPickupSpawns, exitCell, themeMap, seed, level: lvl, maxEnemies };
     }
     // Should be unreachable with sane parameters; guard against silent failure.
     throw new Error('dungeon generation failed after retries');
@@ -2601,12 +2637,18 @@
     enemySpawns = d.enemySpawns;
     pickupSpawns = d.pickupSpawns;
     EXIT = { cellX: d.exitCell.x, cellY: d.exitCell.y };
+    // level-difficulty-ramp: one observable line per generation (logged here,
+    // not in the generator, so its retry loop cannot emit it per attempt).
+    let g = 0;
+    for (const s of d.enemySpawns) if (s.type === 'grunt') g++;
+    console.info('[spawn] level=' + d.level + ' enemies=' + d.enemySpawns.length +
+                 ' grunts=' + g + ' cap=' + d.maxEnemies);
   }
 
   function regenerateDungeon() {
     const seed = pickRandomSeed();
     console.info('[seed] ' + seed);
-    applyDungeon(generateDungeon(seed));
+    applyDungeon(generateDungeon(seed, START_LEVEL));
     resetRun();
     equipFramesLeft = EQUIP_FRAMES;
   }
@@ -2623,7 +2665,9 @@
   function advanceLevel() {
     const seed = pickRandomSeed();
     console.info('[seed] ' + seed);
-    applyDungeon(generateDungeon(seed));
+    // level-difficulty-ramp: generate for the level being entered, so the
+    // argument is the destination level and the increment follows.
+    applyDungeon(generateDungeon(seed, level + 1));
     level += 1;
     enemies = enemySpawns.map(s => makeEnemy(s.x, s.y, s.type));
     pickups = pickupSpawns.map(s => makePickup(s.x, s.y, s.type));
@@ -2646,7 +2690,7 @@
     const initialSeed = parseSeedFromUrl();
     const seed = (initialSeed != null) ? initialSeed : pickRandomSeed();
     console.info('[seed] ' + seed);
-    applyDungeon(generateDungeon(seed));
+    applyDungeon(generateDungeon(seed, START_LEVEL));
     resetRun();
   }
 

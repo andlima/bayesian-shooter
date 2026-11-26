@@ -77,6 +77,12 @@ Health medkits (red cross) and ammo crates (brass shells) spawn scattered
 through the dungeon. Walk over one to pick it up; pickups left at full HP
 / ammo stay in place for later.
 
+Each level is harder than the last, up to level 6: rooms hold more
+enemies and a larger share of them are grunts. Enemy stats, pickups and
+map size do not change with level. Two debug URL parameters exist:
+`?seed=<u32>` pins the initial layout and `?level=<1..999>` starts the
+run at that level.
+
 ## Architecture
 
 - The whole game lives in a single `index.html` — HTML shell, inline CSS,
